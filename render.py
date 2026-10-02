@@ -10,32 +10,38 @@
 #
 
 import torch
-from scene import Scene, DeformModel
+from scene import Scene, GaussianModel, LazyMotionModel
 import os
 from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render
+import typing
+if not hasattr(typing, "OrderedDict"):  # Python 3.7.1 lacks typing.OrderedDict, needed by torchvision
+    import collections
+    typing.OrderedDict = collections.OrderedDict
 import torchvision
 from utils.general_utils import safe_state
 from utils.pose_utils import pose_spherical, render_wander_path
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, get_combined_args
-from gaussian_renderer import GaussianModel
+from arguments import ModelParams, PipelineParams, LazyParams, get_combined_args, eval_config
 import imageio
 import numpy as np
 import time
 
 
-def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform):
+def render_set(model_path, load2gpu_on_the_fly, name, iteration, views, gaussians, pipeline, background, motion):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth")
+    comparison_path = os.path.join(model_path, name, "ours_{}".format(iteration), "comparison.mp4")
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
     makedirs(depth_path, exist_ok=True)
 
+    to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
     t_list = []
+    comparisons = []
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         if load2gpu_on_the_fly:
@@ -43,8 +49,8 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
         fid = view.fid
         xyz = gaussians.get_xyz
         time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof)
+        d_xyz, d_rotation, d_scaling = motion.step(xyz.detach(), time_input)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling)
         rendering = results["render"]
         depth = results["depth"]
         depth = depth / (depth.max() + 1e-5)
@@ -54,6 +60,14 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
 
+        # side-by-side render | gt frame for the comparison video
+        comparison = torch.cat([rendering.clamp(0, 1), gt.clamp(0, 1)], dim=2)
+        comparisons.append(to8b(comparison.cpu().numpy()))
+
+    if len(comparisons) > 0:
+        comparisons = np.stack(comparisons, 0).transpose(0, 2, 3, 1)
+        imageio.mimwrite(comparison_path, comparisons, fps=30, quality=8)
+
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         fid = view.fid
         xyz = gaussians.get_xyz
@@ -62,19 +76,23 @@ def render_set(model_path, load2gpu_on_the_fly, is_6dof, name, iteration, views,
         torch.cuda.synchronize()
         t_start = time.time()
 
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof)
+        d_xyz, d_rotation, d_scaling = motion.step(xyz.detach(), time_input)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling)
 
         torch.cuda.synchronize()
         t_end = time.time()
         t_list.append(t_end - t_start)
 
-    t = np.array(t_list[5:])
-    fps = 1.0 / t.mean()
-    print(f'Test FPS: \033[1;35m{fps:.5f}\033[0m, Num. of GS: {xyz.shape[0]}')
+    if len(views) == 0:
+        print(f'Test FPS: n/a (no "{name}" views), Num. of GS: {gaussians.get_xyz.shape[0]}')
+        return
+
+    t = np.array(t_list[5:]) if len(t_list) > 5 else np.array(t_list)
+    fps = 1.0 / t.mean() if len(t) > 0 else float('nan')
+    print(f'Test FPS: \033[1;35m{fps:.5f}\033[0m, Num. of GS: {gaussians.get_xyz.shape[0]}')
 
 
-def interpolate_time(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform):
+def interpolate_time(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, motion):
     render_path = os.path.join(model_path, name, "interpolate_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_{}".format(iteration), "depth")
 
@@ -91,8 +109,8 @@ def interpolate_time(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, 
         fid = torch.Tensor([t / (frame - 1)]).cuda()
         xyz = gaussians.get_xyz
         time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof)
+        d_xyz, d_rotation, d_scaling = motion.step(xyz.detach(), time_input)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
         depth = results["depth"]
@@ -105,7 +123,7 @@ def interpolate_time(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, 
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def interpolate_view(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, timer):
+def interpolate_view(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, motion):
     render_path = os.path.join(model_path, name, "interpolate_view_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_view_{}".format(iteration), "depth")
     # acc_path = os.path.join(model_path, name, "interpolate_view_{}".format(iteration), "acc")
@@ -137,8 +155,8 @@ def interpolate_view(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, 
 
         xyz = gaussians.get_xyz
         time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = timer.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof)
+        d_xyz, d_rotation, d_scaling = motion.step(xyz.detach(), time_input)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
         depth = results["depth"]
@@ -153,7 +171,7 @@ def interpolate_view(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, 
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def interpolate_all(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, deform):
+def interpolate_all(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, motion):
     render_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "depth")
 
@@ -181,8 +199,8 @@ def interpolate_all(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, v
 
         xyz = gaussians.get_xyz
         time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof)
+        d_xyz, d_rotation, d_scaling = motion.step(xyz.detach(), time_input)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
         depth = results["depth"]
@@ -195,7 +213,7 @@ def interpolate_all(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, v
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def interpolate_poses(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background, timer):
+def interpolate_poses(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, motion):
     render_path = os.path.join(model_path, name, "interpolate_pose_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_pose_{}".format(iteration), "depth")
 
@@ -228,9 +246,9 @@ def interpolate_poses(model_path, load2gpt_on_the_fly, is_6dof, name, iteration,
 
         xyz = gaussians.get_xyz
         time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = timer.step(xyz.detach(), time_input)
+        d_xyz, d_rotation, d_scaling = motion.step(xyz.detach(), time_input)
 
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
         depth = results["depth"]
@@ -240,8 +258,8 @@ def interpolate_poses(model_path, load2gpt_on_the_fly, is_6dof, name, iteration,
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=60, quality=8)
 
 
-def interpolate_view_original(model_path, load2gpt_on_the_fly, is_6dof, name, iteration, views, gaussians, pipeline, background,
-                              timer):
+def interpolate_view_original(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background,
+                              motion):
     render_path = os.path.join(model_path, name, "interpolate_hyper_view_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_hyper_view_{}".format(iteration), "depth")
     # acc_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "acc")
@@ -284,9 +302,9 @@ def interpolate_view_original(model_path, load2gpt_on_the_fly, is_6dof, name, it
 
         xyz = gaussians.get_xyz
         time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = timer.step(xyz.detach(), time_input)
+        d_xyz, d_rotation, d_scaling = motion.step(xyz.detach(), time_input)
 
-        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, is_6dof)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
         depth = results["depth"]
@@ -297,12 +315,12 @@ def interpolate_view_original(model_path, load2gpt_on_the_fly, is_6dof, name, it
 
 
 def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool,
-                mode: str):
+                mode: str, lazy, lazy_override=None):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
-        deform = DeformModel(dataset.is_blender, dataset.is_6dof)
-        deform.load_weights(dataset.model_path)
+        # W / K / epsilon may be overridden at query time without retraining (lazy evaluation)
+        motion = LazyMotionModel.load(dataset.model_path, gaussians, lazy, scene.loaded_iter, lazy_override)
 
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -321,30 +339,39 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
             render_func = interpolate_all
 
         if not skip_train:
-            render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "train", scene.loaded_iter,
+            render_func(dataset.model_path, dataset.load2gpu_on_the_fly, "train", scene.loaded_iter,
                         scene.getTrainCameras(), gaussians, pipeline,
-                        background, deform)
+                        background, motion)
 
         if not skip_test:
-            render_func(dataset.model_path, dataset.load2gpu_on_the_fly, dataset.is_6dof, "test", scene.loaded_iter,
+            render_func(dataset.model_path, dataset.load2gpu_on_the_fly, "test", scene.loaded_iter,
                         scene.getTestCameras(), gaussians, pipeline,
-                        background, deform)
+                        background, motion)
 
 
 if __name__ == "__main__":
+    ev = eval_config()  # defaults for the flags below live in configs.json's "eval" section
+
     # Set up command line argument parser
     parser = ArgumentParser(description="Testing script parameters")
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
-    parser.add_argument("--iteration", default=-1, type=int)
-    parser.add_argument("--skip_train", action="store_true")
-    parser.add_argument("--skip_test", action="store_true")
-    parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--mode", default='render', choices=['render', 'time', 'view', 'all', 'pose', 'original'])
+    lazy = LazyParams(parser, sentinel=True)
+    parser.add_argument("--iteration", default=ev.get("iteration", -1), type=int)
+    parser.add_argument("--skip_train", action="store_true", default=ev.get("skip_train", False))
+    parser.add_argument("--skip_test", action="store_true", default=ev.get("skip_test", False))
+    parser.add_argument("--quiet", action="store_true", default=ev.get("quiet", False))
+    parser.add_argument("--mode", default=ev.get("mode", "render"),
+                        choices=['render', 'time', 'view', 'all', 'pose', 'original'])
+    parser.add_argument("--lazy_W", default=ev.get("lazy_W"), type=int, help="override temporal window at query time")
+    parser.add_argument("--lazy_K", default=ev.get("lazy_K"), type=int, help="override KNN size at query time")
+    parser.add_argument("--lazy_epsilon", default=ev.get("lazy_epsilon"), type=float,
+                        help="re-sparsify records with this epsilon")
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode,
+                lazy.extract(args), {'W': args.lazy_W, 'K': args.lazy_K, 'epsilon': args.lazy_epsilon})

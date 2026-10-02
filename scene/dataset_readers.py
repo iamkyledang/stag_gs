@@ -41,6 +41,8 @@ class CameraInfo(NamedTuple):
     height: int
     fid: float
     depth: Optional[np.array] = None
+    # binary dynamic-object mask (255=dynamic fg, 0=static bg); None if not (yet) segmented, e.g. HyperNeRF
+    mask: Optional[np.array] = None
 
 
 class SceneInfo(NamedTuple):
@@ -147,7 +149,10 @@ def fetchPly(path):
     positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
     colors = np.vstack([vertices['red'], vertices['green'],
                        vertices['blue']]).T / 255.0
-    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    if all(name in vertices.data.dtype.names for name in ('nx', 'ny', 'nz')):
+        normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    else:
+        normals = np.zeros_like(positions)
     return BasicPointCloud(points=positions, colors=colors, normals=normals)
 
 
@@ -406,13 +411,16 @@ def readNerfiesCameras(path):
     coord_scale = scene_json['scale']
     scene_center = scene_json['center']
 
-    name = path.split('/')[-2]
+    # parent folder name (works with '/' and '\' separators); split type is taken from dataset.json keys
+    name = os.path.basename(os.path.dirname(os.path.normpath(path)))
+    has_split = 'train_ids' in dataset_json and 'val_ids' in dataset_json
     if name.startswith('vrig'):
         train_img = dataset_json['train_ids']
         val_img = dataset_json['val_ids']
         all_img = train_img + val_img
         ratio = 0.25
-    elif name.startswith('NeRF'):
+    elif name.startswith('NeRF') or (has_split and not name.startswith('interp')):
+        # NeRF-DS: camera 0 = training video, camera 1 = novel test view, evaluated at 480x270 (rgb/1x)
         train_img = dataset_json['train_ids']
         val_img = dataset_json['val_ids']
         all_img = train_img + val_img
@@ -444,7 +452,14 @@ def readNerfiesCameras(path):
         camera['position'] = camera['position'] * coord_scale
         all_cam_params.append(camera)
 
-    all_img = [f'{path}/rgb/{int(1 / ratio)}x/{i}.png' for i in all_img]
+    # ids (pre-path) are also the mask filenames, at the same rgb/{ratio} resolution folder
+    all_ids = all_img
+    all_img = [f'{path}/rgb/{int(1 / ratio)}x/{i}.png' for i in all_ids]
+    mask_dir = f'{path}/mask/{int(1 / ratio)}x'
+    has_masks = os.path.isdir(mask_dir)
+    if not has_masks:
+        print(f"[Mask] no '{mask_dir}' folder found: dynamic/static split will run without mask supervision "
+              "until one is generated (see generate_masks_sam2.py).")
 
     cam_infos = []
     for idx in range(len(all_img)):
@@ -452,6 +467,12 @@ def readNerfiesCameras(path):
         image = np.array(Image.open(image_path))
         image = Image.fromarray((image).astype(np.uint8))
         image_name = Path(image_path).stem
+
+        mask = None
+        if has_masks:
+            mask_path = f'{mask_dir}/{all_ids[idx]}.png.png'
+            if os.path.exists(mask_path):
+                mask = np.array(Image.open(mask_path).convert('L'))
 
         orientation = all_cam_params[idx]['orientation'].T
         position = -all_cam_params[idx]['position'] @ orientation
@@ -465,7 +486,7 @@ def readNerfiesCameras(path):
         cam_info = CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                               image_path=image_path, image_name=image_name, width=image.size[
                                   0], height=image.size[1],
-                              fid=fid)
+                              fid=fid, mask=mask)
         cam_infos.append(cam_info)
 
     sys.stdout.write('\n')

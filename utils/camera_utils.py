@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+from PIL import Image
 from scene.cameras import Camera
 import numpy as np
 from utils.general_utils import PILtoTorch, ArrayToTorch
@@ -49,12 +50,19 @@ def loadCam(args, id, cam_info, resolution_scale):
     if resized_image_rgb.shape[1] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
 
+    dyn_mask = None
+    if cam_info.mask is not None:
+        # NeRF-DS convention is inverted from what the name suggests: the shipped PNGs are white(255)
+        # for STATIC BACKGROUND (~80% of pixels) and black(0) for the moving hand+object -- confirmed
+        # by direct pixel inspection. So the dynamic-foreground label is low pixel value, not high.
+        dyn_mask = (PILtoTorch(Image.fromarray(cam_info.mask), resolution) < 0.5).float()
+
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T,
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY,
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id,
                   data_device=args.data_device if not args.load2gpu_on_the_fly else 'cpu', fid=cam_info.fid,
-                  depth=cam_info.depth)
+                  depth=cam_info.depth, mask=dyn_mask)
 
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):

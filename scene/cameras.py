@@ -17,7 +17,7 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 
 class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask, image_name, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device="cuda", fid=None, depth=None):
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device="cuda", fid=None, depth=None, mask=None):
         super(Camera, self).__init__()
 
         self.uid = uid
@@ -40,6 +40,8 @@ class Camera(nn.Module):
         self.image_width = self.original_image.shape[2]
         self.image_height = self.original_image.shape[1]
         self.depth = torch.Tensor(depth).to(self.data_device) if depth is not None else None
+        # binary dynamic-object mask [1,H,W] for mask-splatting supervision; None if not segmented yet
+        self.mask = mask.to(self.data_device) if mask is not None else None
 
         if gt_alpha_mask is not None:
             self.original_image *= gt_alpha_mask.to(self.data_device)
@@ -73,6 +75,8 @@ class Camera(nn.Module):
         self.full_proj_transform = self.full_proj_transform.to(data_device)
         self.camera_center = self.camera_center.to(data_device)
         self.fid = self.fid.to(data_device)
+        if self.mask is not None:
+            self.mask = self.mask.to(data_device)
 
 
 class MiniCam:

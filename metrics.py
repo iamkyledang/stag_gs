@@ -13,6 +13,10 @@ from pathlib import Path
 import os
 from PIL import Image
 import torch
+import typing
+if not hasattr(typing, "OrderedDict"):  # Python 3.7.1 lacks typing.OrderedDict, needed by torchvision
+    import collections
+    typing.OrderedDict = collections.OrderedDict
 import torchvision.transforms.functional as tf
 from utils.loss_utils import ssim
 # from lpipsPyTorch import lpips
@@ -21,6 +25,7 @@ import json
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser
+from arguments import eval_config
 
 
 def readImages(renders_dir, gt_dir):
@@ -99,12 +104,15 @@ def evaluate(model_paths):
 
 
 if __name__ == "__main__":
+    ev = eval_config()  # default LPIPS backbone lives in configs.json's "eval" section
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
-    lpips_fn = lpips.LPIPS(net='vgg').to(device)
 
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     parser.add_argument('--model_paths', '-m', required=True, nargs="+", type=str, default=[])
+    parser.add_argument('--net', default=ev.get("lpips_net", "vgg"), type=str, help="LPIPS backbone network")
     args = parser.parse_args()
+
+    lpips_fn = lpips.LPIPS(net=args.net).to(device)
     evaluate(args.model_paths)
