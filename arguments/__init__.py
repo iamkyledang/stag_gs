@@ -14,7 +14,7 @@ import json
 import sys
 import os
 
-# configs.json (LazyGS/configs.json) is the single source of truth for hyperparameter defaults;
+# configs.json (stag_gs/configs.json) is the single source of truth for hyperparameter defaults;
 # CLI flags still override whatever is loaded here.
 _CONFIGS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs.json")
 try:
@@ -119,8 +119,8 @@ class OptimizationParams(ParamGroup):
         super().__init__(parser, "Optimization Parameters", config_section="optimization")
 
 
-class LazyParams(ParamGroup):
-    """Lazy-evaluated dynamic Gaussians (framework.tex): A / W / K and the training schedule."""
+class SparseAnchorParams(ParamGroup):
+    """Sparse-anchor dynamic Gaussians (framework.tex): A / W / K and the training schedule."""
 
     def __init__(self, parser, sentinel=False):
         # representation (A, W, K)
@@ -148,12 +148,12 @@ class LazyParams(ParamGroup):
         self.lambda_temporal = 0.05
         self.lambda_scale = 1.0
         # learning rates (exponential decay to 10% of init, rescoped to start at warm_up/each refine -- see
-        # LazyMotionModel._rebuild_schedule)
+        # SparseAnchorMotionModel._rebuild_schedule)
         self.motion_lr_init = 0.0008
         self.motion_lr_final = 0.00008
         self.motion_rot_lr = 0.001
         self.motion_scale_lr = 0.001
-        super().__init__(parser, "Lazy Motion Parameters", sentinel, config_section="lazy")
+        super().__init__(parser, "Sparse Anchor Motion Parameters", sentinel, config_section="sparse_anchor")
 
 
 def get_combined_args(parser: ArgumentParser):

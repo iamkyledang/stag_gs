@@ -10,7 +10,7 @@
 #
 
 import torch
-from scene import Scene, GaussianModel, LazyMotionModel
+from scene import Scene, GaussianModel, SparseAnchorMotionModel
 import os
 from tqdm import tqdm
 from os import makedirs
@@ -23,7 +23,7 @@ import torchvision
 from utils.general_utils import safe_state
 from utils.pose_utils import pose_spherical, render_wander_path
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, LazyParams, get_combined_args, eval_config
+from arguments import ModelParams, PipelineParams, SparseAnchorParams, get_combined_args, eval_config
 import imageio
 import numpy as np
 import time
@@ -315,12 +315,12 @@ def interpolate_view_original(model_path, load2gpt_on_the_fly, name, iteration, 
 
 
 def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool,
-                mode: str, lazy, lazy_override=None):
+                mode: str, sparse_anchor, sparse_anchor_override=None):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
-        # W / K / epsilon may be overridden at query time without retraining (lazy evaluation)
-        motion = LazyMotionModel.load(dataset.model_path, gaussians, lazy, scene.loaded_iter, lazy_override)
+        # W / K / epsilon may be overridden at query time without retraining (sparse-anchor evaluation)
+        motion = SparseAnchorMotionModel.load(dataset.model_path, gaussians, sparse_anchor, scene.loaded_iter, sparse_anchor_override)
 
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -356,16 +356,16 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="Testing script parameters")
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
-    lazy = LazyParams(parser, sentinel=True)
+    sparse_anchor = SparseAnchorParams(parser, sentinel=True)
     parser.add_argument("--iteration", default=ev.get("iteration", -1), type=int)
     parser.add_argument("--skip_train", action="store_true", default=ev.get("skip_train", False))
     parser.add_argument("--skip_test", action="store_true", default=ev.get("skip_test", False))
     parser.add_argument("--quiet", action="store_true", default=ev.get("quiet", False))
     parser.add_argument("--mode", default=ev.get("mode", "render"),
                         choices=['render', 'time', 'view', 'all', 'pose', 'original'])
-    parser.add_argument("--lazy_W", default=ev.get("lazy_W"), type=int, help="override temporal window at query time")
-    parser.add_argument("--lazy_K", default=ev.get("lazy_K"), type=int, help="override KNN size at query time")
-    parser.add_argument("--lazy_epsilon", default=ev.get("lazy_epsilon"), type=float,
+    parser.add_argument("--sparse_anchor_W", default=ev.get("sparse_anchor_W"), type=int, help="override temporal window at query time")
+    parser.add_argument("--sparse_anchor_K", default=ev.get("sparse_anchor_K"), type=int, help="override KNN size at query time")
+    parser.add_argument("--sparse_anchor_epsilon", default=ev.get("sparse_anchor_epsilon"), type=float,
                         help="re-sparsify records with this epsilon")
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
@@ -374,4 +374,4 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode,
-                lazy.extract(args), {'W': args.lazy_W, 'K': args.lazy_K, 'epsilon': args.lazy_epsilon})
+                sparse_anchor.extract(args), {'W': args.sparse_anchor_W, 'K': args.sparse_anchor_K, 'epsilon': args.sparse_anchor_epsilon})

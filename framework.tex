@@ -236,7 +236,7 @@ The complete query-time flow is
 }.
 \]
 
-The framework is therefore \textbf{lazy-evaluated}: dense temporal Gaussian states are not permanently stored. Motion information is reconstructed only for the anchors and Gaussians required by the current query.
+The framework is therefore \textbf{sparse-anchor evaluated}: dense temporal Gaussian states are not permanently stored. Motion information is reconstructed only for the anchors and Gaussians required by the current query.
 
 \section*{9. Difference from Common Dynamic 3DGS Representations}
 
@@ -257,7 +257,7 @@ Explicit trajectory
 & Canonical 3DGS plus per-Gaussian temporal coefficients
 & Evaluate a stored polynomial, Fourier, or related trajectory model\\
 \addlinespace
-\textbf{Lazy-evaluated framework}
+\textbf{Sparse-anchor framework}
 & Canonical 3DGS plus sparse significant changes at periodic anchors
 & Reconstruct local motion on demand using $A$, $W$, $K$, $\mathbf{J}_i$, and bidirectional consensus\\
 \bottomrule

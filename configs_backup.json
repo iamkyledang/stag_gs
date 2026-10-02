@@ -1,5 +1,5 @@
 { 
-  "_comment": "Single source of truth for LazyGS hyperparameters/defaults. Loaded by arguments/__init__.py; CLI flags still override any value here.", 
+  "_comment": "Single source of truth for stag_gs hyperparameters/defaults. Loaded by arguments/__init__.py; CLI flags still override any value here.", 
  
   "model": { 
     "sh_degree": 3, 
@@ -37,7 +37,7 @@
     "debug": false 
   }, 
  
-  "lazy": { 
+  "sparse_anchor": { 
     "anchor_stride": 8, 
     "temporal_window": 2, 
     "knn_k": 48, 
@@ -78,9 +78,9 @@
     "skip_train": false, 
     "skip_test": false, 
     "quiet": false, 
-    "lazy_W": null, 
-    "lazy_K": null, 
-    "lazy_epsilon": null, 
+    "sparse_anchor_W": null, 
+    "sparse_anchor_K": null, 
+    "sparse_anchor_epsilon": null, 
     "lpips_net": "vgg" 
   } 
 } 

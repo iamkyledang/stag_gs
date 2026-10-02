@@ -1,4 +1,4 @@
-"""Lazy-Evaluated Dynamic 3D Gaussians: sparse per-Gaussian anchors + query-time motion interpolation.
+"""Sparse-Anchor Dynamic 3D Gaussians: sparse per-Gaussian anchors + query-time motion interpolation.
 
 Revised design (see change_log/):
   * canonical 3DGS + per-anchor deltas (dx, so(3) log-rotation, dlog-scale) at anchors of stride A, for
@@ -109,8 +109,8 @@ def _wls_line_fit(taus, weights, values, t0):
     return v, a
 
 
-class LazyMotionModel:
-    """Per-Gaussian sparse anchor storage + lazy query-time reconstruction of (x, r, s) for every
+class SparseAnchorMotionModel:
+    """Per-Gaussian sparse anchor storage + query-time reconstruction of (x, r, s) for every
     dynamic Gaussian. Every Gaussian the mask-vote segmentation calls dynamic keeps its own
     independently-optimised anchor deltas (no control-node subsampling / prediction tier); the only
     thing segmentation does is scope the KNN graph (build_knn) and the cubic-MLS smoothing to the
@@ -178,7 +178,7 @@ class LazyMotionModel:
         self._dscale = nn.Parameter(torch.zeros(M, N, 3, device='cuda'))
         self.knn_dirty = True
         self._setup_optimizer(opt)
-        print("[Lazy] motion enabled: {} anchors (stride {}), {} Gaussians, W={}, K={}".format(
+        print("[SparseAnchor] motion enabled: {} anchors (stride {}), {} Gaussians, W={}, K={}".format(
             M, self.A * 2 ** self.level, N, self.W, self.K))
 
     def capture(self):
@@ -528,7 +528,7 @@ class LazyMotionModel:
         self._replace_params(new, lambda n, ea, es: (ea[:, keep_local], es[:, keep_local]))
         n_before = int(self.is_dyn.sum())
         self.is_dyn = keep_full
-        print("[Lazy] background freeze: {} -> {} dynamic Gaussians ({:.1f}%), mask-vote driven".format(
+        print("[SparseAnchor] background freeze: {} -> {} dynamic Gaussians ({:.1f}%), mask-vote driven".format(
             n_before, int(keep_full.sum()), 100.0 * keep_full.float().mean().item()))
 
         dyn_idx = self.dyn_idx   # refreshed post-freeze
@@ -536,7 +536,7 @@ class LazyMotionModel:
         centroid = xyz_dyn.mean(0)
         self.object_radius = float((xyz_dyn - centroid).norm(dim=-1).quantile(0.95).clamp_min(1e-6))
         self.knn_dirty = True
-        print("[Lazy] dynamic object: {} Gaussians, object_radius={:.4f}".format(
+        print("[SparseAnchor] dynamic object: {} Gaussians, object_radius={:.4f}".format(
             int(self.is_dyn.sum()), self.object_radius))
 
     # ------------------------------------------------------------------ coarse-to-fine anchors
@@ -561,7 +561,7 @@ class LazyMotionModel:
         self._replace_params(new)   # fresh Adam moments: shape changed along the anchor axis
         if iteration is not None:
             self._rebuild_schedule(iteration)
-        print("[Lazy] anchors refined: {} -> {} (stride {})".format(M_old, new_t.numel(), self.A * 2 ** self.level))
+        print("[SparseAnchor] anchors refined: {} -> {} (stride {})".format(M_old, new_t.numel(), self.A * 2 ** self.level))
 
     # ------------------------------------------------------------------ sparse storage
     @torch.no_grad()
@@ -610,12 +610,12 @@ class LazyMotionModel:
         sparse_bytes = n_rec * (4 + 9 * 2) + M * 4 * 3
         dense_bytes = M * Nd * 9 * 2
         file_bytes = os.path.getsize(os.path.join(out_dir, "motion.npz"))
-        print("[Lazy] storage: {} anchors x {} dynamic Gaussians, records kept {}/{} ({:.1f}%): "
+        print("[SparseAnchor] storage: {} anchors x {} dynamic Gaussians, records kept {}/{} ({:.1f}%): "
               "sparse {:.2f} MB vs dense-fp16 {:.2f} MB (file {:.2f} MB)".format(
                   M, Nd, n_rec, M * Nd, 100.0 * n_rec / max(1, M * Nd), sparse_bytes / 2 ** 20,
                   dense_bytes / 2 ** 20, file_bytes / 2 ** 20))
 
-    # ------------------------------------------------------------------ loading / lazy decode
+    # ------------------------------------------------------------------ loading / sparse decode
     @classmethod
     def load(cls, model_path, gaussians, args, iteration=-1, override=None):
         """Load a sparse motion checkpoint. `override` may set W / K / epsilon for query-time ablations."""
@@ -648,7 +648,7 @@ class LazyMotionModel:
         self.is_dyn[torch.from_numpy(z['dyn_idx'].astype(np.int64)).cuda()] = True
         self._set_sparse({k: z[k] for k in ('rec_counts', 'rec_idx', 'rec_val')}, fill_k=meta['K'])
         n_rec = int(z['rec_counts'].sum())
-        print("[Lazy] loaded {}: {} anchors, {} dynamic / {} Gaussians, {} sparse records".format(
+        print("[SparseAnchor] loaded {}: {} anchors, {} dynamic / {} Gaussians, {} sparse records".format(
             path, self.num_anchors, int(self.is_dyn.sum()), N, n_rec))
         if override.get('epsilon') is not None and override['epsilon'] != meta['epsilon']:
             self.resparsify(override['epsilon'])
@@ -674,7 +674,7 @@ class LazyMotionModel:
 
     @torch.no_grad()
     def _decoded_anchor(self, a):
-        """Lazily reconstruct dynamic-Gaussian deltas of anchor a from its sparse records (missing == zero)."""
+        """Reconstruct dynamic-Gaussian deltas of anchor a from its sparse records (missing == zero)."""
         if a in self._anchor_cache:
             return self._anchor_cache[a]
         S = self.sparse
@@ -698,5 +698,5 @@ class LazyMotionModel:
         self._set_sparse(S, fill_k=self.K)
         M, Nd = dense.shape[0], dense.shape[1]
         n_rec = int(S['rec_counts'].sum())
-        print("[Lazy] re-sparsified with epsilon={}: records {}/{} ({:.1f}%), ~{:.2f} MB".format(
+        print("[SparseAnchor] re-sparsified with epsilon={}: records {}/{} ({:.1f}%), ~{:.2f} MB".format(
             eps, n_rec, M * Nd, 100.0 * n_rec / max(1, M * Nd), (n_rec * 22 + Nd * 4) / 2 ** 20))

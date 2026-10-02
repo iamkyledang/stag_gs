@@ -1,5 +1,5 @@
 #
-# LazyGS: lazy-evaluated dynamic 3D Gaussians (see framework.tex), trained from scratch through the
+# stag_gs: sparse-anchor dynamic 3D Gaussians (see framework.tex), trained from scratch through the
 # query-time operator. Derived from train.py of Deformable-3D-Gaussians / 3D Gaussian Splatting
 # (Inria / GRAPHDECO license, see LICENSE.md).
 #
@@ -13,9 +13,9 @@ from random import randint
 import torch
 from tqdm import tqdm
 
-from arguments import LazyParams, ModelParams, OptimizationParams, PipelineParams, train_config
+from arguments import SparseAnchorParams, ModelParams, OptimizationParams, PipelineParams, train_config
 from gaussian_renderer import render
-from scene import GaussianModel, LazyMotionModel, Scene
+from scene import GaussianModel, SparseAnchorMotionModel, Scene
 from utils.general_utils import get_linear_noise_func, safe_state
 from utils.image_utils import psnr
 from utils.loss_utils import l1_loss, ssim
@@ -39,13 +39,13 @@ def motion_deltas(motion, fid, t_noise=0.0):
     return motion.deltas_at(float(fid.reshape(-1)[0]) + t_noise)
 
 
-def training(dataset, opt, pipe, lazy, testing_iterations, saving_iterations, checkpoint_iterations, start_checkpoint):
+def training(dataset, opt, pipe, sparse_anchor, testing_iterations, saving_iterations, checkpoint_iterations, start_checkpoint):
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
 
     T = count_train_frames(scene.getTrainCameras())
-    motion = LazyMotionModel(lazy, T, scene.cameras_extent)
+    motion = SparseAnchorMotionModel(sparse_anchor, T, scene.cameras_extent)
 
     resumed_iteration = 0
     if start_checkpoint:
@@ -61,8 +61,8 @@ def training(dataset, opt, pipe, lazy, testing_iterations, saving_iterations, ch
 
     gaussians.on_densify = motion.on_densify
     gaussians.on_prune = motion.on_prune
-    print("[Lazy] {} training frames, A={} (start stride {}), W={}, K={}".format(
-        T, lazy.anchor_stride, lazy.anchor_stride * 2 ** lazy.coarse_levels, lazy.temporal_window, lazy.knn_k))
+    print("[SparseAnchor] {} training frames, A={} (start stride {}), W={}, K={}".format(
+        T, sparse_anchor.anchor_stride, sparse_anchor.anchor_stride * 2 ** sparse_anchor.coarse_levels, sparse_anchor.temporal_window, sparse_anchor.knn_k))
 
     # AST time-noise (real-data trick from Deformable-3D-Gaussians): jitters the query time by up to
     # ~half a frame early in training, annealed to ~0 by the end, so the motion model doesn't overfit to
@@ -89,15 +89,15 @@ def training(dataset, opt, pipe, lazy, testing_iterations, saving_iterations, ch
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        # ---- lazy-motion schedule: warm-up -> coarse-to-fine anchors -> dynamic-set selection
+        # ---- sparse-anchor motion schedule: warm-up -> coarse-to-fine anchors -> dynamic-set selection
         if iteration == opt.warm_up and not motion.active:
             motion.setup(gaussians, opt)
         if motion.active:
-            if iteration in lazy.anchor_refine_iters:
+            if iteration in sparse_anchor.anchor_refine_iters:
                 motion.refine_anchors(iteration)
-            if iteration == lazy.dyn_select_iter:
-                motion.freeze_background(lazy.dyn_w_min)
-            if iteration % lazy.knn_update_interval == 0:
+            if iteration == sparse_anchor.dyn_select_iter:
+                motion.freeze_background(sparse_anchor.dyn_w_min)
+            if iteration % sparse_anchor.knn_update_interval == 0:
                 motion.knn_dirty = True
 
         # Pick a random Camera
@@ -126,8 +126,8 @@ def training(dataset, opt, pipe, lazy, testing_iterations, saving_iterations, ch
 
         if info is not None:
             reg = motion.regularization(info)
-            loss = loss + lazy.lambda_rigid * reg['rigid'] + lazy.lambda_temporal * reg['temporal'] \
-                + lazy.lambda_scale * reg['scale']
+            loss = loss + sparse_anchor.lambda_rigid * reg['rigid'] + sparse_anchor.lambda_temporal * reg['temporal'] \
+                + sparse_anchor.lambda_scale * reg['scale']
             for k in ema_reg:
                 ema_reg[k] = 0.4 * reg[k].item() + 0.6 * ema_reg[k]
         loss.backward()
@@ -158,7 +158,7 @@ def training(dataset, opt, pipe, lazy, testing_iterations, saving_iterations, ch
             # point set, so this must run before densify_and_prune below)
             if viewpoint_cam.mask is not None:
                 gaussians.accumulate_dyn_votes(render_pkg_re["dyn_votes_fg"], render_pkg_re["dyn_votes_w"],
-                                               lazy.mask_vote_decay)
+                                               sparse_anchor.mask_vote_decay)
 
             # Log and save
             cur_psnr = training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
@@ -286,8 +286,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
             if motion.active:
-                tb_writer.add_scalar('lazy/dynamic_points', int(motion.is_dyn.sum()), iteration)
-                tb_writer.add_scalar('lazy/num_anchors', motion.num_anchors, iteration)
+                tb_writer.add_scalar('sparse_anchor/dynamic_points', int(motion.is_dyn.sum()), iteration)
+                tb_writer.add_scalar('sparse_anchor/num_anchors', motion.num_anchors, iteration)
         torch.cuda.empty_cache()
 
     return test_psnr
@@ -301,7 +301,7 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
-    zp = LazyParams(parser)
+    zp = SparseAnchorParams(parser)
     parser.add_argument('--detect_anomaly', action='store_true', default=tc.get("detect_anomaly", False))
     parser.add_argument("--test_iterations", nargs="+", type=int,
                         default=tc.get("test_iterations", [5000, 6000, 7_000] + list(range(10000, 40001, 1000))))
