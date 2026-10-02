@@ -1,0 +1,10 @@
+Linear assumption of KNN
+Birth, death of Gaussians blob
+Temporal visiblity deltas
+Background motion models
+
+The previous bugs remain:
+- motion LR decays too quickly,
+- fine anchors receive too few updates,
+- regularizers are too strong/mis-scaled,
+- anchor stride \(A=8\) might be too coarse.

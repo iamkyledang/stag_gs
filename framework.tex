@@ -1,0 +1,278 @@
+\documentclass[10pt]{article}
+
+\usepackage[a4paper,margin=0.72in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{mathtools}
+
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+\setlist[itemize]{leftmargin=1.4em,itemsep=2pt,topsep=2pt}
+
+\newcommand{\Gc}{\mathcal{G}^{c}}
+\newcommand{\Da}{\mathcal{D}^{a}}
+\newcommand{\Anch}{\mathcal{A}}
+\newcommand{\Win}{\mathcal{A}_{W}(t)}
+\newcommand{\NKi}{\mathcal{N}_{i}^{(K)}}
+\newcommand{\R}{\mathbb{R}}
+
+\title{\vspace{-1.0em}\textbf{STAG-GS:
+Sparse Temporal Anchor Learning for Dynamic 3D Gaussian Splatting}\\
+\large Sparse State Storage and Query-Time Motion Interpolation}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-1.2em}
+
+\section*{1. Core Idea}
+
+The framework represents a dynamic scene using \textbf{one persistent 3D Gaussian Splatting (3DGS) scene} together with \textbf{sparse temporal motion records}. Instead of storing a complete set of Gaussians for every frame, only significant changes are retained at selected temporal anchors.
+
+At a query time $t$, the required Gaussian state is reconstructed \emph{on demand}. The method uses:
+\begin{itemize}
+    \item an \textbf{anchor stride} $A$ controlling temporal storage density,
+    \item a \textbf{temporal window} $W$ controlling how many neighboring anchor intervals contribute, and
+    \item a \textbf{spatial neighborhood size} $K$ controlling how many nearby Gaussians provide local motion evidence.
+\end{itemize}
+
+The output is the interpolated position, rotation, and scale
+\[
+\hat{\mathbf{x}}_i(t),\qquad \hat{\mathbf{r}}_i(t),\qquad \hat{\mathbf{s}}_i(t),
+\]
+which are passed directly to the standard 3DGS projection and rasterization pipeline.
+
+\section*{2. Persistent Scene Representation and Sparse Temporal Storage}
+
+For a scene with $N$ persistent Gaussian identities, keep one canonical representation
+\[
+\Gc = \{G_i^c\}_{i=1}^{N},
+\qquad
+G_i^c = \bigl(\mathbf{x}_i^c,\mathbf{r}_i^c,\mathbf{s}_i^c,\alpha_i,\mathbf{c}_i,\ldots\bigr),
+\]
+where $\mathbf{x}_i^c$ is the canonical position, $\mathbf{r}_i^c$ the canonical rotation, $\mathbf{s}_i^c$ the canonical scale, and $\alpha_i,\mathbf{c}_i$ denote the usual 3DGS appearance parameters.
+
+At a retained time $a$, the framework does \textbf{not} save another complete Gaussian scene. Instead, it stores only Gaussians whose motion state differs meaningfully from the canonical state:
+\[
+\Da =
+\left\{
+\left(i,\Delta\mathbf{x}_i^a,\Delta\boldsymbol{\rho}_i^a,\Delta\boldsymbol{\ell}_i^a\right)
+\;:\;
+ d_i^a > \varepsilon
+\right\},
+\]
+with
+\begin{align}
+\Delta\mathbf{x}_i^a &= \mathbf{x}_i^a-\mathbf{x}_i^c,\\
+\Delta\boldsymbol{\rho}_i^a
+&= \operatorname{Log}\!\left(\mathbf{r}_i^a\otimes(\mathbf{r}_i^c)^{-1}\right),\\
+\Delta\boldsymbol{\ell}_i^a
+&= \log \mathbf{s}_i^a-\log \mathbf{s}_i^c.
+\end{align}
+Here $d_i^a$ is a normalized change score and $\varepsilon$ determines whether the change is significant enough to store. If Gaussian $i$ is absent from $\Da$, its change at anchor $a$ is treated as negligible.
+
+The retained anchor times are
+\[
+\Anch=\{1,1+A,1+2A,\ldots\}.
+\]
+Thus, $A=1$ is the dense special case in which every observed frame is eligible as an anchor, while $A>1$ reduces temporal storage.
+
+A rough storage cost is
+\[
+\underbrace{O(N)}_{\text{canonical 3DGS}}
++
+\underbrace{O\!\left(\sum_{a\in\Anch}|\Da|\right)}_{\text{sparse temporal records}},
+\]
+instead of storing $O(NT)$ complete Gaussian states for $T$ frames. If only a fraction $\rho$ of Gaussians changes significantly at each retained anchor, the dynamic component is approximately
+\[
+O\!\left(\frac{\rho NT}{A}\right).
+\]
+
+\section*{3. Query-Time Context: $A$, $W$, and $K$}
+
+Let query time $t$ lie between two consecutive anchors $a_m\le t\le a_{m+1}$. The temporal window contains neighboring anchors around the query interval:
+\[
+\Win
+=
+\{a_{m-W+1},\ldots,a_m,a_{m+1},\ldots,a_{m+W}\}\cap\Anch.
+\]
+The value $W$ therefore counts \textbf{anchor intervals}, not raw frames. With $W=1$, only the immediate bracketing anchors are used. Increasing $W$ provides more past and future temporal evidence. When $A=1$, every frame is an anchor and $W$ becomes ordinary frame-level temporal context.
+
+For Gaussian $i$, define $\NKi$ as its $K$ nearest Gaussian neighbors in 3D position space. The three main controls therefore have distinct roles:
+\[
+\boxed{
+A=\text{temporal sampling density},\qquad
+W=\text{temporal context},\qquad
+K=\text{spatial context}.
+}
+\]
+
+\section*{4. Reconstructing Anchor States Only When Needed}
+
+At inference time, no 3DGS retraining is performed. For each required anchor $a\in\Win$, reconstruct Gaussian $i$ from the canonical state and the sparse record:
+\begin{align}
+\mathbf{x}_i^a &= \mathbf{x}_i^c+\Delta\mathbf{x}_i^a,\\
+\mathbf{r}_i^a &= \operatorname{Exp}(\Delta\boldsymbol{\rho}_i^a)\otimes\mathbf{r}_i^c,\\
+\log\mathbf{s}_i^a &= \log\mathbf{s}_i^c+\Delta\boldsymbol{\ell}_i^a.
+\end{align}
+If no record exists for Gaussian $i$ at anchor $a$, its stored change is taken as zero. Appearance parameters remain in the persistent 3DGS representation; the present formulation focuses on geometric motion through position, rotation, and scale.
+
+\section*{5. Motion State Between Neighboring Anchors}
+
+For two consecutive retained times $a<b$, with $\Delta t=b-a$, define the Gaussian motion rates
+\begin{align}
+\mathbf{v}_i &= \frac{\mathbf{x}_i^b-\mathbf{x}_i^a}{\Delta t},\\
+\boldsymbol{\omega}_i
+&= \frac{\operatorname{Log}\!\left(\mathbf{r}_i^b\otimes(\mathbf{r}_i^a)^{-1}\right)}{\Delta t},\\
+\boldsymbol{\eta}_i
+&= \frac{\log\mathbf{s}_i^b-\log\mathbf{s}_i^a}{\Delta t}.
+\end{align}
+Stack them into a unified local motion state
+\[
+\mathbf{u}_i=
+\begin{bmatrix}
+\mathbf{v}_i\\
+\boldsymbol{\omega}_i\\
+\boldsymbol{\eta}_i
+\end{bmatrix}
+\in\R^9.
+\]
+This allows translation, rotation, and scale to be handled jointly by the same local motion reconstruction stage.
+
+\section*{6. Local Spatial Motion Gradient}
+
+Nearby Gaussians provide spatial evidence about how the motion state changes around Gaussian $i$. For each neighbor $j\in\NKi$, define
+\[
+\Delta\mathbf{x}_{ij}=\mathbf{x}_j-\mathbf{x}_i,
+\qquad
+\Delta\mathbf{u}_{ij}=\mathbf{u}_j-\mathbf{u}_i.
+\]
+Assume that local motion varies approximately linearly over a sufficiently small neighborhood:
+\[
+\Delta\mathbf{u}_{ij}\approx \mathbf{J}_i\Delta\mathbf{x}_{ij},
+\qquad
+\mathbf{J}_i\in\R^{9\times3}.
+\]
+The local motion gradient is estimated by weighted least squares:
+\[
+\mathbf{J}_i=
+\left(
+\sum_{j\in\NKi}
+ w_{ij}\,\Delta\mathbf{u}_{ij}\Delta\mathbf{x}_{ij}^{\top}
+\right)
+\left(
+\sum_{j\in\NKi}
+ w_{ij}\,\Delta\mathbf{x}_{ij}\Delta\mathbf{x}_{ij}^{\top}
++
+\epsilon_J\mathbf{I}
+\right)^{-1}.
+\]
+The matrix $\mathbf{J}_i$ describes how the local 9D motion state varies with 3D spatial displacement. It lets nearby Gaussian motion contribute to a locally corrected estimate of the motion of Gaussian $i$.
+
+\section*{7. Bidirectional Temporal Transport and Consensus}
+
+Let the locally corrected motion estimate be
+\[
+\tilde{\mathbf{u}}_i=
+\begin{bmatrix}
+\tilde{\mathbf{v}}_i\\
+\tilde{\boldsymbol{\omega}}_i\\
+\tilde{\boldsymbol{\eta}}_i
+\end{bmatrix}.
+\]
+A transport step of duration $\delta t$ is
+\begin{align}
+\mathbf{x}_i' &= \mathbf{x}_i+\delta t\,\tilde{\mathbf{v}}_i,\\
+\mathbf{r}_i' &= \operatorname{Exp}(\delta t\,\tilde{\boldsymbol{\omega}}_i)\otimes\mathbf{r}_i,\\
+\log\mathbf{s}_i' &= \log\mathbf{s}_i+\delta t\,\tilde{\boldsymbol{\eta}}_i.
+\end{align}
+Within the selected window $\Win$, information is transported from past anchors toward $t$ and independently from future anchors toward $t$. This produces a forward estimate
+\[
+(\mathbf{x}_i^F,\mathbf{r}_i^F,\mathbf{s}_i^F)
+\]
+and a backward estimate
+\[
+(\mathbf{x}_i^B,\mathbf{r}_i^B,\mathbf{s}_i^B).
+\]
+
+A reliability weight $\lambda_i\in[0,1]$, derived from the local motion fit, fuses the two estimates:
+\begin{align}
+\hat{\mathbf{x}}_i(t)
+&=\lambda_i\mathbf{x}_i^F+(1-\lambda_i)\mathbf{x}_i^B,\\
+\hat{\mathbf{r}}_i(t)
+&=\operatorname{SLERP}\!\left(\mathbf{r}_i^B,\mathbf{r}_i^F,\lambda_i\right),\\
+\log\hat{\mathbf{s}}_i(t)
+&=\lambda_i\log\mathbf{s}_i^F+(1-\lambda_i)\log\mathbf{s}_i^B.
+\end{align}
+The reconstructed Gaussian set $\hat{\mathcal{G}}(t)$ is then passed directly to the standard 3DGS rasterizer.
+
+\section*{8. Inference Pipeline}
+
+The complete query-time flow is
+\[
+\boxed{
+\text{query }t
+\rightarrow
+\text{read anchors in }\Win
+\rightarrow
+\text{KNN of size }K
+\rightarrow
+\mathbf{u}_i,\mathbf{J}_i
+\rightarrow
+\text{bidirectional transport}
+\rightarrow
+\text{consensus}
+\rightarrow
+\hat{\mathcal{G}}(t)
+\rightarrow
+\text{3DGS rasterizer}
+}.
+\]
+
+The framework is therefore \textbf{lazy-evaluated}: dense temporal Gaussian states are not permanently stored. Motion information is reconstructed only for the anchors and Gaussians required by the current query.
+
+\section*{9. Difference from Common Dynamic 3DGS Representations}
+
+\renewcommand{\arraystretch}{1.15}
+\begin{center}
+\small
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.20\linewidth}
+                >{\raggedright\arraybackslash}p{0.36\linewidth}
+                >{\raggedright\arraybackslash}p{0.36\linewidth}}
+\toprule
+\textbf{Approach} & \textbf{Stored temporal representation} & \textbf{Query-time motion}\\
+\midrule
+Learned deformation
+& Canonical 3DGS plus a learned deformation network
+& Evaluate a learned function such as $F_{\theta}(\mathbf{x},t)$\\
+\addlinespace
+Explicit trajectory
+& Canonical 3DGS plus per-Gaussian temporal coefficients
+& Evaluate a stored polynomial, Fourier, or related trajectory model\\
+\addlinespace
+\textbf{Lazy-evaluated framework}
+& Canonical 3DGS plus sparse significant changes at periodic anchors
+& Reconstruct local motion on demand using $A$, $W$, $K$, $\mathbf{J}_i$, and bidirectional consensus\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{10. Main Ablation Axes}
+
+The formulation exposes three direct and interpretable ablations:
+\begin{itemize}
+    \item \textbf{$A$ --- anchor stride:} tests dense versus sparse temporal storage. Larger $A$ reduces storage but makes interpolation more difficult.
+    \item \textbf{$W$ --- temporal window:} tests short versus long temporal context around the query time.
+    \item \textbf{$K$ --- spatial neighborhood:} tests how much local Gaussian context is required for reliable motion reconstruction.
+\end{itemize}
+
+The dense special case $A=1$ keeps every observed frame eligible as an anchor. Larger values of $A$ progressively move the framework toward sparse temporal storage while preserving the same query-time reconstruction mechanism.
+
+\end{document}
