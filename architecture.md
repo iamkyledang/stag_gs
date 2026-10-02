@@ -84,14 +84,14 @@ Standard 3DGS (canonical point cloud: xyz, SH color, opacity, scale, rotation) p
 
 ### 3.1 Motivating idea ("framework.tex")
 
-Replace the MLP deform field with a **lazy-evaluated, sparse control-node** motion representation:
+Replace the MLP deform field with a **sparse-anchor, sparse control-node** motion representation:
 instead of asking a neural net "what is the motion of point x at time t?", store motion *samples*
 ("anchors") at a small number of discrete times and a small number of discrete spatial control nodes,
 and reconstruct the motion of any Gaussian at any query time via local-linear interpolation/
 extrapolation — done **through** the query operator so training gradients reach every anchor used in
 a given render (not a two-stage fit-then-render pipeline).
 
-High-level query algorithm (`LazyMotionModel.deltas_at(t)` and friends, in `scene/lazy_motion.py`):
+High-level query algorithm (`SparseAnchorMotionModel.deltas_at(t)` and friends, in `scene/sparse_anchor_motion.py`):
 
 1. Map continuous query time `t` to a **window of `W` anchor intervals** around `t` at stride `A`
    (frames), i.e. `W` anchors on each side.
@@ -169,7 +169,7 @@ Implemented, decisions locked before implementation:
   Graph/LBS formulation.
 - Temporal visibility (opacity) is a first-class 10th channel now, not deferred.
 
-Key `LazyMotionModel` surface (post-Tier-1):
+Key `SparseAnchorMotionModel` surface (post-Tier-1):
 - `freeze_and_select_controls(tau_w, num_nodes)` replaces the old per-Gaussian `select_dynamic` (which
   was circular — it needed motion to already exist to decide who gets motion).
 - `is_dyn` (bool `[N]`), `is_ctrl` (bool `[N]`, subset of `is_dyn`), `ctrl_idx`/`free_idx` properties
@@ -185,7 +185,7 @@ Key `LazyMotionModel` surface (post-Tier-1):
 - **Storage simplified**: the old two-tier control + non-control-residual encoding is gone — only
   control-node records are ever persisted (`motion.npz` stores `ctrl_idx_global`); non-control values
   are always re-derived at load time via `_predict_from_controls`.
-- `LazyParams` changes: removed `eps_dyn`, `control_frac`; added `dyn_w_min` (10.0), `num_nodes` (512),
+- `SparseAnchorParams` changes: removed `eps_dyn`, `control_frac`; added `dyn_w_min` (10.0), `num_nodes` (512),
   `kappa_opacity` (2.0), `lambda_opacity` (0.1), `motion_opacity_lr` (0.05).
 - **Not safe on HyperNeRF yet** — without masks, `dyn_prob` is uniformly ~0 everywhere and
   `freeze_and_select_controls` would freeze the entire point cloud.
@@ -217,7 +217,7 @@ loss = (1 - lambda_dssim) * L1(render, gt) + lambda_dssim * (1 - SSIM(render, gt
      + lambda_scale    * reg['scale']
      + lambda_opacity  * reg['opacity']
 ```
-`reg` comes from `LazyMotionModel.regularization(info)`, computed over the **free (control) point set
+`reg` comes from `SparseAnchorMotionModel.regularization(info)`, computed over the **free (control) point set
 only** (rigid/ARAP-style term, temporal 2nd-difference smoothness, scale-delta penalty, opacity-delta
 penalty). No BCE/mask loss term anymore (removed with Stage A rev. 2 — the mask vote is now a
 non-differentiable statistic, not a supervised prediction).
@@ -228,12 +228,12 @@ non-differentiable statistic, not a supervised prediction).
 |---|---|
 | `model` | `sh_degree=3`, `load2gpu_on_the_fly=false` |
 | `optimization` | `iterations=20000`, `warm_up=3000`, standard 3DGS lr/densify schedule |
-| `lazy` (representation) | `anchor_stride=8` (A), `temporal_window=2` (W), `knn_k=16` (K), `transport_order=2`, `mls_beta=0.5`, `consensus_sigma=1.0`, `wls_eps=0.01`, `coarse_levels=3` |
-| `lazy` (schedule) | `anchor_refine_iters=[5000,7000,9000]`, `dyn_select_iter=11000`, `dyn_w_min=10.0`, `num_nodes=512`, `knn_update_interval=1000` |
-| `lazy` (segmentation) | `mask_vote_decay=0.999` |
-| `lazy` (storage) | `epsilon=0.05`, `score_kappa_rot=0.2`, `score_kappa_scale=0.2`, `kappa_opacity=2.0` |
-| `lazy` (regularizers) | `lambda_rigid=1.0`, `lambda_temporal=0.05`, `lambda_scale=1.0`, `lambda_opacity=0.1` |
-| `lazy` (motion lr) | `motion_lr_init=0.0008`, `motion_lr_final=0.00008`, `motion_rot_lr=0.001`, `motion_scale_lr=0.001`, `motion_opacity_lr=0.05` |
+| `sparse_anchor` (representation) | `anchor_stride=8` (A), `temporal_window=2` (W), `knn_k=16` (K), `transport_order=2`, `mls_beta=0.5`, `consensus_sigma=1.0`, `wls_eps=0.01`, `coarse_levels=3` |
+| `sparse_anchor` (schedule) | `anchor_refine_iters=[5000,7000,9000]`, `dyn_select_iter=11000`, `dyn_w_min=10.0`, `num_nodes=512`, `knn_update_interval=1000` |
+| `sparse_anchor` (segmentation) | `mask_vote_decay=0.999` |
+| `sparse_anchor` (storage) | `epsilon=0.05`, `score_kappa_rot=0.2`, `score_kappa_scale=0.2`, `kappa_opacity=2.0` |
+| `sparse_anchor` (regularizers) | `lambda_rigid=1.0`, `lambda_temporal=0.05`, `lambda_scale=1.0`, `lambda_opacity=0.1` |
+| `sparse_anchor` (motion lr) | `motion_lr_init=0.0008`, `motion_lr_final=0.00008`, `motion_rot_lr=0.001`, `motion_scale_lr=0.001`, `motion_opacity_lr=0.05` |
 
 ### 3.8 Training loop structure (`stag_gs/train.py`)
 

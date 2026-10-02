@@ -1,11 +1,11 @@
-# LazyGS: Lazy-Evaluated Dynamic 3D Gaussians
+# stag_gs: Sparse-Anchor Dynamic 3D Gaussians
 
 Monocular dynamic scene reconstruction with **canonical 3D Gaussian Splatting + sparse per-anchor motion deltas**,
-evaluated lazily at query time (no deformation MLP). The full method description is in [framework.tex](framework.tex).
+reconstructed on demand at query time (no deformation MLP). The full method description is in [framework.tex](framework.tex).
 
 This is a fork of [Deformable-3D-Gaussians](https://github.com/ingra14m/Deformable-3D-Gaussians): the canonical
 3DGS model, data loaders, rasterizer and metrics are kept as-is, and the deformation MLP is replaced entirely by
-[scene/lazy_motion.py](scene/lazy_motion.py). The GUI viewer, which depended on the MLP, was removed.
+[scene/sparse_anchor_motion.py](scene/sparse_anchor_motion.py). The GUI viewer, which depended on the MLP, was removed.
 
 ## How it works
 
@@ -23,11 +23,11 @@ Gaussians. Regularisers: local rigidity, temporal smoothness, scale-delta L2.
 
 | path | role |
 | --- | --- |
-| `train.py` | from-scratch training (canonical 3DGS + lazy motion) |
+| `train.py` | from-scratch training (canonical 3DGS + sparse-anchor motion) |
 | `render.py` | render test/train split, or time/view interpolation videos |
 | `metrics.py` | PSNR / SSIM / LPIPS over rendered outputs |
 | `full_eval.sh` | train -> render -> metrics over NeRF-DS and HyperNeRF (interp) |
-| `scene/lazy_motion.py` | anchors, KNN, local fit, transport, dynamic-set selection, sparse encode/decode |
+| `scene/sparse_anchor_motion.py` | anchors, KNN, local fit, transport, dynamic-set selection, sparse encode/decode |
 | `scene/gaussian_model.py` | canonical 3DGS, with hooks so motion parameters follow clone/split/prune |
 | `arguments/__init__.py` | CLI params, defaulted from [configs.json](configs.json) |
 
@@ -35,10 +35,10 @@ Gaussians. Regularisers: local rigidity, temporal smoothness, scale-delta L2.
 
 ```shell
 git clone <this repo> --recursive
-cd LazyGS
+cd stag_gs
 
-conda create -n lazygs python=3.7
-conda activate lazygs
+conda create -n stag_gs python=3.7
+conda activate stag_gs
 
 pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
 pip install -r requirements.txt
@@ -56,7 +56,7 @@ Point `-s` at the scene folder that contains `dataset.json` (or `transforms_trai
 ├── nerf_ds/as_novel_view/
 ├── hypernerf_interp/interp_aleks-teapot/aleks-teapot/
 ├── dnerf/hook/
-└── LazyGS/          <- this repository
+└── stag_gs/          <- this repository
 ```
 
 ## Train
@@ -69,7 +69,7 @@ python train.py -s ../nerf_ds/as_novel_view -m output/as --eval --load2gpu_on_th
 python train.py -s ../dnerf/hook -m output/hook --eval --white_background
 ```
 
-Most useful lazy-motion flags (full list and defaults in `LazyParams`, [arguments/__init__.py](arguments/__init__.py)):
+Most useful sparse-anchor motion flags (full list and defaults in `SparseAnchorParams`, [arguments/__init__.py](arguments/__init__.py)):
 
 | flag | meaning | default |
 | --- | --- | --- |
@@ -91,7 +91,7 @@ python render.py -m output/as --mode render
 python metrics.py -m output/as
 
 # query-time ablations on an already-trained model (no retraining)
-python render.py -m output/as --mode render --lazy_W 1 --lazy_K 8 --lazy_epsilon 0.1
+python render.py -m output/as --mode render --sparse_anchor_W 1 --sparse_anchor_K 8 --sparse_anchor_epsilon 0.1
 ```
 
 `--mode` is one of `render` (test images), `time` (time interpolation), `view` (view synthesis), `all` (time + view),
