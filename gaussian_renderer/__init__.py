@@ -14,7 +14,6 @@ import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
-from utils.rigid_utils import from_homogenous, to_homogenous
 
 
 def quaternion_multiply(q1, q2):
@@ -29,10 +28,15 @@ def quaternion_multiply(q1, q2):
     return torch.stack((w, x, y, z), dim=-1)
 
 
-def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_xyz, d_rotation, d_scaling, is_6dof=False,
-           scaling_modifier=1.0, override_color=None):
+def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_xyz=0.0, d_rotation=0.0, d_scaling=0.0,
+           scaling_modifier=1.0, override_color=None, pix_label=None):
     """
-    Render the scene.
+    Render the scene at canonical + additive motion deltas (d_xyz [N,3], d_rotation [N,4], d_scaling [N,3]).
+    Opacity is never deformed. Scalars (0.0) render the canonical scene.
+
+    pix_label: optional [1,H,W]/[H,W] dynamic-object mask. When given, the same forward pass also splats
+    visibility-weighted mask votes per Gaussian (see GaussianRasterizer.forward); returned as
+    "dyn_votes_fg" / "dyn_votes_w" ([N], no grad; empty tensors when pix_label is None).
 
     Background tensor (bg_color) must be on GPU!
     """
@@ -67,14 +71,7 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-    if is_6dof:
-        if torch.is_tensor(d_xyz) is False:
-            means3D = pc.get_xyz
-        else:
-            means3D = from_homogenous(
-                torch.bmm(d_xyz, to_homogenous(pc.get_xyz).unsqueeze(-1)).squeeze(-1))
-    else:
-        means3D = pc.get_xyz + d_xyz
+    means3D = pc.get_xyz + d_xyz
     opacity = pc.get_opacity
 
     # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
@@ -105,7 +102,7 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
         colors_precomp = override_color
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
-    rendered_image, radii, depth = rasterizer(
+    rendered_image, radii, depth, votes_fg, votes_w = rasterizer(
         means3D=means3D,
         means2D=screenspace_points,
         means2D_densify=screenspace_points_densify,
@@ -114,7 +111,8 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
         opacities=opacity,
         scales=scales,
         rotations=rotations,
-        cov3D_precomp=cov3D_precomp)
+        cov3D_precomp=cov3D_precomp,
+        pix_label=pix_label)
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
@@ -123,4 +121,6 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, d_
             "viewspace_points_densify": screenspace_points_densify,
             "visibility_filter": radii > 0,
             "radii": radii,
-            "depth": depth}
+            "depth": depth,
+            "dyn_votes_fg": votes_fg,
+            "dyn_votes_w": votes_w}
