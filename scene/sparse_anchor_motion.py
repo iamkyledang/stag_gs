@@ -574,7 +574,7 @@ class SparseAnchorMotionModel:
             D = dense[a]
             keep = self.change_score(D[:, 0:3], D[:, 3:6], D[:, 6:9], denom) > eps
             ic = torch.nonzero(keep).squeeze(1)
-            rec_idx.append(ic.int().cpu()); rec_val.append(D[ic].half().cpu()); rec_cnt.append(ic.numel())
+            rec_idx.append(ic.int().cpu()); rec_val.append(D[ic].float().cpu()); rec_cnt.append(ic.numel())
         return {
             'rec_counts': np.array(rec_cnt, dtype=np.int32), 'rec_idx': torch.cat(rec_idx).numpy(),
             'rec_val': torch.cat(rec_val).numpy(),
@@ -607,11 +607,11 @@ class SparseAnchorMotionModel:
     def _report_storage(self, S, dense_shape, out_dir):
         M, Nd, _ = dense_shape
         n_rec = int(S['rec_counts'].sum())
-        sparse_bytes = n_rec * (4 + 9 * 2) + M * 4 * 3
-        dense_bytes = M * Nd * 9 * 2
+        sparse_bytes = n_rec * (4 + 9 * 4) + M * 4 * 3
+        dense_bytes = M * Nd * 9 * 4
         file_bytes = os.path.getsize(os.path.join(out_dir, "motion.npz"))
         print("[SparseAnchor] storage: {} anchors x {} dynamic Gaussians, records kept {}/{} ({:.1f}%): "
-              "sparse {:.2f} MB vs dense-fp16 {:.2f} MB (file {:.2f} MB)".format(
+              "sparse {:.2f} MB vs dense-fp32 {:.2f} MB (file {:.2f} MB)".format(
                   M, Nd, n_rec, M * Nd, 100.0 * n_rec / max(1, M * Nd), sparse_bytes / 2 ** 20,
                   dense_bytes / 2 ** 20, file_bytes / 2 ** 20))
 
@@ -699,4 +699,4 @@ class SparseAnchorMotionModel:
         M, Nd = dense.shape[0], dense.shape[1]
         n_rec = int(S['rec_counts'].sum())
         print("[SparseAnchor] re-sparsified with epsilon={}: records {}/{} ({:.1f}%), ~{:.2f} MB".format(
-            eps, n_rec, M * Nd, 100.0 * n_rec / max(1, M * Nd), (n_rec * 22 + Nd * 4) / 2 ** 20))
+            eps, n_rec, M * Nd, 100.0 * n_rec / max(1, M * Nd), (n_rec * 40 + Nd * 4) / 2 ** 20))
