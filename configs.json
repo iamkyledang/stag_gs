@@ -1,6 +1,4 @@
 {
-  "_comment": "Single source of truth for stag_gs hyperparameters/defaults. Loaded by arguments/__init__.py; CLI flags still override any value here.",
-
   "model": {
     "sh_degree": 3,
     "images": "images",
@@ -12,18 +10,22 @@
   },
 
   "optimization": {
-    "iterations": 20000,
+    "iterations": 40000,
     "warm_up": 3000,
+
     "position_lr_init": 0.00016,
     "position_lr_final": 0.0000016,
     "position_lr_delay_mult": 0.01,
     "position_lr_max_steps": 30000,
+
     "feature_lr": 0.0025,
     "opacity_lr": 0.05,
     "scaling_lr": 0.001,
     "rotation_lr": 0.001,
+
     "percent_dense": 0.01,
     "lambda_dssim": 0.2,
+
     "densification_interval": 100,
     "opacity_reset_interval": 3000,
     "densify_from_iter": 500,
@@ -31,56 +33,46 @@
     "densify_grad_threshold": 0.0007
   },
 
-  "pipeline": {
-    "convert_SHs_python": false,
-    "compute_cov3D_python": false,
-    "debug": false
-  },
-
   "sparse_anchor": {
     "anchor_stride": 4,
     "temporal_window": 2,
     "knn_k": 48,
     "transport_order": 2,
+
     "consensus_sigma": 1.0,
     "no_fit_confidence": false,
     "wls_eps": 0.01,
+
     "coarse_levels": 3,
     "anchor_refine_iters": [5000, 7000, 9000],
-    "dyn_select_iter": 11000,
+
+    "dyn_select_iter": 3000,
     "dyn_w_min": 10.0,
     "knn_update_interval": 1000,
     "mask_vote_decay": 0.999,
-    "epsilon": 0.05,
+
+    "epsilon": 0.0,
     "score_kappa_rot": 0.2,
     "score_kappa_scale": 0.2,
+
     "lambda_rigid": 0.3,
     "lambda_temporal": 0.05,
     "lambda_scale": 0.3,
+
     "motion_lr_init": 0.0008,
-    "motion_lr_final": 0.00016,
+    "motion_lr_final": 0.00008,
     "motion_rot_lr": 0.001,
     "motion_scale_lr": 0.001
   },
 
   "train": {
-    "detect_anomaly": false,
-    "quiet": false,
-    "test_iterations": [7000, 11000, 15000, 20000],
-    "save_iterations": [7000, 11000, 15000, 20000],
-    "checkpoint_iterations": [7000, 11000, 15000, 20000],
-    "start_checkpoint": null
-  },
-
-  "eval": {
-    "iteration": -1,
-    "mode": "render",
-    "skip_train": false,
-    "skip_test": false,
-    "quiet": false,
-    "sparse_anchor_W": null,
-    "sparse_anchor_K": null,
-    "sparse_anchor_epsilon": null,
-    "lpips_net": "vgg"
+    "test_iterations": [
+      10000, 15000, 20000, 25000,
+      30000, 35000, 40000
+    ],
+    "save_iterations": [
+      15000, 20000, 25000,
+      30000, 35000, 40000
+    ]
   }
 }
