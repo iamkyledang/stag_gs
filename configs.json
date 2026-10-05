@@ -37,7 +37,7 @@
     "anchor_stride": 4,
     "temporal_window": 2,
     "knn_k": 48,
-    "transport_order": 2,
+    "temporal_basis_order": 3,
 
     "consensus_sigma": 1.0,
     "no_fit_confidence": false,
@@ -46,8 +46,6 @@
     "coarse_levels": 3,
     "anchor_refine_iters": [5000, 7000, 9000],
 
-    "dyn_select_iter": 3000,
-    "dyn_w_min": 10.0,
     "knn_update_interval": 1000,
     "mask_vote_decay": 0.999,
 
@@ -60,9 +58,12 @@
     "lambda_scale": 0.3,
 
     "motion_lr_init": 0.0008,
-    "motion_lr_final": 0.00008,
     "motion_rot_lr": 0.001,
-    "motion_scale_lr": 0.001
+    "motion_scale_lr": 0.001,
+    "motion_beta_init": 0.02,
+    "motion_beta_lr": 0.005,
+    "motion_gate_init": 0.98,
+    "motion_gate_lr": 0.005
   },
 
   "train": {

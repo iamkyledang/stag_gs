@@ -8,3 +8,116 @@ The previous bugs remain:
 - fine anchors receive too few updates,
 - regularizers are too strong/mis-scaled,
 - anchor stride \(A=8\) might be too coarse.
+
+
+2/10/2026:
++Use FP32, change epilson to 0.0
++Use 40k iterations
++"dyn_select_iter": 3000 
+
+5/10/2026:
++Temporal transport becomes linear algebra basis (tensors) instead of constant acceleration formulation
++Spatial transport becomes lie-consistent local twist transport. The information is below:
+Given your new temporal transport basis, I think the spatial component should become a Lie-consistent local twist transport.
+The key observation is that your temporal basis outputs
+\[
+u_i(t)=
+[v_i(t),\omega_i(t),\eta_i(t)],
+\]
+so you already have something physically meaningful: translational velocity, angular velocity, and scale rate. Instead of fitting a generic cubic polynomial through these values, use the geometry of rigid motion directly.
+For a neighbor \(j\), its motion can be transported to Gaussian \(i\) as
+\[
+\boxed{
+v_{j\rightarrow i}
+=
+v_j+
+\omega_j\times(x_i-x_j)
+}
+\]
+\[
+\boxed{
+\omega_{j\rightarrow i}=\omega_j
+}
+\]
+and, initially,
+\[
+\eta_{j\rightarrow i}=\eta_j.
+\]
+This formula is important. If several Gaussians belong to the same rigid part, their translational velocities are not supposed to be equal. A rotating object naturally has
+\[
+v(x)=v_0+\omega\times(x-x_0).
+\]
+Cubic MLS does not explicitly know this. A Lie/twist transport does.
+So if an arm rotates, a Gaussian farther from the joint should move faster automatically. You don't need a cubic spatial polynomial to discover that relation from data.
+I would keep KNN, but use it only to find candidate neighbors. Then each neighbor \(j\) proposes a transported motion at \(i\):
+\[
+u_{j\rightarrow i}(t)
+=
+\begin{bmatrix}
+v_j+\omega_j\times(x_i-x_j)\\
+\omega_j\\
+\eta_j
+\end{bmatrix}.
+\]
+Aggregate them:
+\[
+\boxed{
+u_i^{local}
+=
+\frac{
+\sum_{j\in\mathcal N_i}
+w_{ij}u_{j\rightarrow i}
+}{
+\sum_{j\in\mathcal N_i}w_{ij}
+}
+}
+\]
+but make \(w_{ij}\) motion-aware, not just distance-based:
+\[
+w_{ij}
+=
+w^{geo}_{ij}
+w^{motion}_{ij}.
+\]
+For example,
+\[
+w^{geo}_{ij}
+=
+\exp
+\left(
+-\frac{\|x_i-x_j\|^2}{2\sigma_x^2}
+\right)
+\]
+and because your temporal dictionary gives every Gaussian coefficients \(a_i\),
+\[
+w^{motion}_{ij}
+=
+\exp
+\left(
+-\frac{\|a_i-a_j\|^2}{2\sigma_a^2}
+\right).
+\]
+This is exactly where your new temporal representation and spatial representation complement each other.
+Two Gaussians can be physically close but have
+\[
+a_i\neq a_j.
+\]
+Then their edge becomes weak.
+
+
++Each gaussian got replaced self motion. Thus, I propose Use the residual formulation we discussed:
+\[
+\boxed{
+u_i^{final}
+=
+u_i^{self}
++
+\beta_i
+\left(
+u_i^{local}-u_i^{self}
+\right)
+}
+\] where beta_i is dynamically trained during the training. The more detailed information will be discussed during the prompt, or chat.
+
+
++Dynamic and static gaussians blobs should not be fixed at iter 3000. It should be dynamically trained during the baseline, that means the p_i_dyn is often changed during the training. More detailed will be discussed in the prompt.
