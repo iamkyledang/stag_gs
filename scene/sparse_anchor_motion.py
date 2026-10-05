@@ -2,11 +2,17 @@
 
 Revised design (see change_log/):
   * canonical 3DGS + per-anchor deltas (dx, so(3) log-rotation, dlog-scale) at anchors of stride A, for
-    every dynamic Gaussian (segmentation-based dynamic/static split, no control-node subsampling):
-    each dynamic Gaussian always keeps its own independently-optimised anchor deltas.
-  * query t -> window of W anchor intervals -> motion rates u in R^9 -> degree-3 cubic MLS smoothing
-    over the K=48 nearest neighbours *within the same (dynamic) object* -> bidirectional (forward/
-    backward) Taylor transport -> confidence-weighted consensus.
+    every Gaussian (all Gaussians keep motion parameters permanently now -- see the learned per-Gaussian
+    gate below -- no control-node subsampling, no one-shot background freeze).
+  * query t -> window of W anchor intervals -> motion rates u in R^9 -> per-Gaussian Legendre-basis
+    fit of u(tau) (replaces the old 2-point "constant acceleration" line fit, see _wls_basis_fit) ->
+    Lie-consistent local twist transport over the K=48 nearest neighbours (motion-aware KNN weights,
+    see _twist_correct) -> trained residual blend u_self + beta_i*(u_local-u_self) -> bidirectional
+    (forward/backward) Taylor transport -> confidence-weighted consensus.
+  * a learned per-Gaussian gate g_i = sigmoid(gate_logit_i), trained end-to-end purely by the
+    photometric + regularization loss (no mask/BCE supervision), continuously scales how much motion
+    is applied (see deltas_at) -- replaces the old one-shot `freeze_background` hard dynamic/static
+    split; the dynamic/static boundary can now move in either direction throughout training.
   * opacity is never deformed: only (d_xyz, d_rotation, d_scaling) are produced.
 
 Training is done *through* the query operator (gradients reach every anchor in the window), so the
@@ -26,103 +32,61 @@ from utils.lie_utils import quat_conj, quat_mul, quat_normalize, quat_rotate, qu
 from utils.system_utils import searchForMaxIteration
 
 
-# --------------------------------------------------------------------------------------------------
-# Degree-3 cubic moving-least-squares motion model
-# --------------------------------------------------------------------------------------------------
-# Exponents (ex, ey, ez) of the 20 monomials of a trivariate polynomial basis up to total degree 3.
-_CUBIC_EXPONENTS = [
-    (0, 0, 0),
-    (1, 0, 0), (0, 1, 0), (0, 0, 1),
-    (2, 0, 0), (0, 2, 0), (0, 0, 2), (1, 1, 0), (0, 1, 1), (1, 0, 1),
-    (3, 0, 0), (0, 3, 0), (0, 0, 3), (2, 1, 0), (2, 0, 1), (1, 2, 0), (0, 2, 1), (1, 0, 2), (0, 1, 2), (1, 1, 1),
-]
+def _legendre_values(x, order):
+    """[P_0(x), ..., P_order(x)] (physicists' Legendre polynomials) via Bonnet's recursion. x: float."""
+    P = [1.0, x]
+    for n in range(1, order):
+        P.append(((2 * n + 1) * x * P[n] - n * P[n - 1]) / (n + 1))
+    return P[:order + 1]
 
 
-def _cubic_basis(xi):
-    """xi [...,3] normalized local coordinates -> Phi [...,20] monomial basis, total degree <= 3."""
-    x, y, z = xi[..., 0], xi[..., 1], xi[..., 2]
-    terms = []
-    for ex, ey, ez in _CUBIC_EXPONENTS:
-        t = torch.ones_like(x)
-        if ex:
-            t = t * x ** ex
-        if ey:
-            t = t * y ** ey
-        if ez:
-            t = t * z ** ez
-        terms.append(t)
-    return torch.stack(terms, dim=-1)
+def _legendre_derivatives(x, order):
+    """[P_0'(x), ..., P_order'(x)] via P'_{n+1} = (n+1) P_n + x P'_n."""
+    P = _legendre_values(x, order)
+    Pp = [0.0, 1.0]
+    for n in range(1, order):
+        Pp.append((n + 1) * P[n] + x * Pp[n])
+    return Pp[:order + 1]
 
 
-def cubic_mls_fit(dx, w, field_nbr, eps_rel=1e-2, chunk_size=8192):
-    """Degree-3 moving-least-squares fit of `field_nbr` (values sampled at K neighbours, [Q,K,D]) as a
-    cubic trivariate polynomial of the neighbours' *normalized* local coordinates `dx` ([Q,K,3],
-    already divided by each query point's own local bandwidth), weighted by `w` [Q,K]. Returns the
-    MLS-smoothed field value at the query point itself (the polynomial's constant/0th-order term,
-    i.e. evaluated at the normalized origin) and the per-neighbour fit residual (used for confidence).
-
-    Processed in chunks along Q: the batched 20x20 solve and its K-neighbour expansions scale with
-    Q*K*D and can exhaust GPU memory for large dynamic point sets otherwise (differentiable either way).
+def _wls_basis_fit(taus, weights, values, t0, order):
+    """Weighted least-squares fit of the rate series `values(tau)` (python list, len n) against a
+    degree-`order` Legendre basis in the normalized offset xi = (tau - t0) / s (s = window half-width),
+    replacing the old 2-point (v, a) "constant acceleration" line fit with a genuine small linear-
+    algebra solve for `order + 1` per-Gaussian coefficients -- a basis/tensor fit instead of a fixed
+    functional-form assumption. Falls back to a lower order (down to 0, i.e. just the mean) when fewer
+    than order + 1 samples are available (window edges). Returns (coeffs [order+1, ..., D], s).
     """
-    Q = dx.shape[0]
-    if Q <= chunk_size:
-        return _cubic_mls_fit_chunk(dx, w, field_nbr, eps_rel)
-    centers, residuals = [], []
-    for lo in range(0, Q, chunk_size):
-        hi = min(lo + chunk_size, Q)
-        c, r = _cubic_mls_fit_chunk(dx[lo:hi], w[lo:hi], field_nbr[lo:hi], eps_rel)
-        centers.append(c)
-        residuals.append(r)
-    return torch.cat(centers, dim=0), torch.cat(residuals, dim=0)
-
-
-def _cubic_mls_fit_chunk(dx, w, field_nbr, eps_rel):
-    Phi = _cubic_basis(dx)                                          # [Q,K,20]
-    wPhi = w.unsqueeze(-1) * Phi
-    cov = torch.einsum('qkb,qkc->qbc', wPhi, Phi)                   # [Q,20,20]
-    reg = eps_rel * cov.diagonal(dim1=-2, dim2=-1).mean(-1).clamp_min(1e-12)
-    cov = cov + reg.view(-1, 1, 1) * torch.eye(Phi.shape[-1], device=dx.device, dtype=dx.dtype)
-    rhs = torch.einsum('qkb,qkd->qbd', wPhi, field_nbr)             # [Q,20,D]
-    C = torch.linalg.solve(cov, rhs)                                # [Q,20,D]
-    field_center = C[:, 0, :]                                       # constant term = value at xi=0
-    pred_nbr = torch.einsum('qkb,qbd->qkd', Phi, C)
-    res = field_nbr - pred_nbr
-    return field_center, res
-
-
-def _wls_line_fit(taus, weights, values, t0):
-    """Per-element weighted linear fit  value(tau) ~= v + a (tau - t0)  over a few time samples.
-
-    taus, weights: python lists (len n); values [n, ...]. Returns (v, a) with the shape of values[0].
-    """
-    if len(taus) == 1:
-        return values[0], torch.zeros_like(values[0])
-    x = torch.tensor([tt - t0 for tt in taus], dtype=values.dtype, device=values.device)
-    om = torch.tensor(weights, dtype=values.dtype, device=values.device)
-    shape = (-1,) + (1,) * (values.dim() - 1)
-    s0, s1, s2 = om.sum(), (om * x).sum(), (om * x * x).sum()
-    u0 = (om.view(shape) * values).sum(0)
-    u1 = ((om * x).view(shape) * values).sum(0)
-    den = (s0 * s2 - s1 * s1).clamp_min(1e-12)
-    a = (s0 * u1 - s1 * u0) / den
-    v = (u0 - a * s1) / s0
-    return v, a
+    n = len(taus)
+    order = max(min(order, n - 1), 0)
+    if order == 0:
+        return values[0].unsqueeze(0), 1.0
+    s = max(max(abs(tt - t0) for tt in taus), 1e-6)
+    xi = [(tt - t0) / s for tt in taus]
+    Phi = torch.tensor([_legendre_values(x, order) for x in xi], dtype=values[0].dtype, device=values[0].device)
+    w = torch.tensor(weights, dtype=values[0].dtype, device=values[0].device)
+    wPhi = w.unsqueeze(-1) * Phi                                    # [n, order+1]
+    M = wPhi.t() @ Phi                                              # [order+1, order+1]
+    M = M + 1e-6 * torch.eye(order + 1, device=M.device, dtype=M.dtype)
+    V = torch.stack(values, dim=0)                                  # [n, ..., D]
+    rhs = wPhi.t() @ V.reshape(n, -1)                               # [order+1, prod(...)*D]
+    C = torch.linalg.solve(M, rhs).reshape((order + 1,) + V.shape[1:])
+    return C, s
 
 
 class SparseAnchorMotionModel:
     """Per-Gaussian sparse anchor storage + query-time reconstruction of (x, r, s) for every
-    dynamic Gaussian. Every Gaussian the mask-vote segmentation calls dynamic keeps its own
-    independently-optimised anchor deltas (no control-node subsampling / prediction tier); the only
-    thing segmentation does is scope the KNN graph (build_knn) and the cubic-MLS smoothing to the
-    dynamic object's own points, so a per-Gaussian motion never gets smoothed against unrelated static
-    background neighbours."""
+    Gaussian. Every Gaussian keeps its own independently-optimised anchor deltas permanently (no
+    control-node subsampling / prediction tier, no one-shot background freeze); a learned per-Gaussian
+    gate (see deltas_at) continuously controls how much of the reconstructed motion is actually
+    applied, so the dynamic/static boundary is trained rather than hard-coded."""
 
     def __init__(self, args, num_train_frames, scene_extent):
         self.args = args
         self.A = int(args.anchor_stride)
         self.W = int(args.temporal_window)
         self.K = int(args.knn_k)
-        self.order = int(args.transport_order)
+        self.basis_order = int(args.temporal_basis_order)
         self.sigma_c = float(args.consensus_sigma)
         self.use_confidence = not args.no_fit_confidence
         self.T = max(int(num_train_frames), 2)
@@ -135,8 +99,9 @@ class SparseAnchorMotionModel:
         self.gaussians = None
         self.anchor_times = None      # [M] float tensor (cuda)
         self._dx = self._drot = self._dscale = None   # [M, Ndyn, .]
-        self.is_dyn = None             # [N] bool: dynamic (post-freeze) vs frozen-static
-        self.object_radius = None      # robust bounding radius of the dynamic object, set at freeze
+        self.is_dyn = None             # [N] bool: always all-True now (kept in lockstep with normal
+                                        # Gaussian densify/prune); dynamic/static is the learned gate now
+        self.object_radius = None      # unused (no more one-shot freeze); _score_denominator falls back to extent
         self._dyn_xyz = None           # canonical xyz of the dynamic (anchor-carrying) points [Ndyn,3]
         self.nbr_idx = self.nbr_w = None
         self.knn_dirty = True
@@ -167,7 +132,8 @@ class SparseAnchorMotionModel:
 
     def setup(self, gaussians, opt):
         """Called once at the end of the static warm-up: every Gaussian starts dynamic with zero deltas.
-        Background freeze happens later, see freeze_background."""
+        Dynamic/static is now a continuously trained per-Gaussian gate (self._gate, see deltas_at), not
+        a one-shot freeze -- every Gaussian keeps its motion parameters for the rest of training."""
         self.gaussians = gaussians
         N = gaussians.get_xyz.shape[0]
         self.anchor_times = self._anchor_times_for_level(self.level)
@@ -176,6 +142,22 @@ class SparseAnchorMotionModel:
         self._dx = nn.Parameter(torch.zeros(M, N, 3, device='cuda'))
         self._drot = nn.Parameter(torch.zeros(M, N, 3, device='cuda'))
         self._dscale = nn.Parameter(torch.zeros(M, N, 3, device='cuda'))
+        # residual-blend weight beta_i = sigmoid(logit_i), one scalar per Gaussian (not per-anchor --
+        # stored with a dummy leading "M=1" axis purely so it can ride the existing (M,Ndyn,D)-shaped
+        # densify/prune/replace machinery in _params()/on_densify/on_prune unchanged). Initialised near
+        # 0 (trust each Gaussian's own anchor motion first; neighbour twist-transport info phases in
+        # only where it helps the loss).
+        beta0 = float(self.args.motion_beta_init)
+        beta_logit0 = math.log(beta0 / (1.0 - beta0))
+        self._beta = nn.Parameter(torch.full((1, N, 1), beta_logit0, device='cuda'))
+        # dynamic/static gate g_i = sigmoid(logit_i), trained end-to-end purely by the photometric +
+        # regularization loss (no mask/BCE supervision) -- replaces the one-shot freeze_background split.
+        # Initialised high (motion fully applied by default, matching the old pre-freeze behaviour) so
+        # early training isn't starved of gradient for genuinely moving Gaussians; the gate only learns
+        # to suppress motion where that actually reduces the loss.
+        gate0 = float(self.args.motion_gate_init)
+        gate_logit0 = math.log(gate0 / (1.0 - gate0))
+        self._gate = nn.Parameter(torch.full((1, N, 1), gate_logit0, device='cuda'))
         self.knn_dirty = True
         self._setup_optimizer(opt)
         print("[SparseAnchor] motion enabled: {} anchors (stride {}), {} Gaussians, W={}, K={}".format(
@@ -189,6 +171,7 @@ class SparseAnchorMotionModel:
         return {
             'level': self.level, 'anchor_times': self.anchor_times, 'is_dyn': self.is_dyn,
             'object_radius': self.object_radius, 'dx': self._dx, 'drot': self._drot, 'dscale': self._dscale,
+            'beta_logit': self._beta, 'gate_logit': self._gate,
             'optimizer': self.optimizer.state_dict(), 'lr_ref_iter': self._lr_ref_iter,
         }
 
@@ -201,6 +184,8 @@ class SparseAnchorMotionModel:
         self._dx = nn.Parameter(state['dx'])
         self._drot = nn.Parameter(state['drot'])
         self._dscale = nn.Parameter(state['dscale'])
+        self._beta = nn.Parameter(state['beta_logit'])
+        self._gate = nn.Parameter(state['gate_logit'])
         self.knn_dirty = True
         self.training = True
         self._setup_optimizer(opt)
@@ -213,6 +198,8 @@ class SparseAnchorMotionModel:
             {'params': [self._dx], 'lr': a.motion_lr_init, 'name': 'dx'},
             {'params': [self._drot], 'lr': a.motion_rot_lr, 'name': 'drot'},
             {'params': [self._dscale], 'lr': a.motion_scale_lr, 'name': 'dscale'},
+            {'params': [self._beta], 'lr': a.motion_beta_lr, 'name': 'beta'},
+            {'params': [self._gate], 'lr': a.motion_gate_lr, 'name': 'gate'},
         ]
         self.optimizer = torch.optim.Adam(groups, lr=0.0, eps=1e-15)
         self._opt = opt
@@ -231,6 +218,8 @@ class SparseAnchorMotionModel:
             'dx': get_expon_lr_func(a.motion_lr_init, a.motion_lr_init * 0.1, max_steps=max_steps),
             'drot': get_expon_lr_func(a.motion_rot_lr, a.motion_rot_lr * 0.1, max_steps=max_steps),
             'dscale': get_expon_lr_func(a.motion_scale_lr, a.motion_scale_lr * 0.1, max_steps=max_steps),
+            'beta': get_expon_lr_func(a.motion_beta_lr, a.motion_beta_lr * 0.1, max_steps=max_steps),
+            'gate': get_expon_lr_func(a.motion_gate_lr, a.motion_gate_lr * 0.1, max_steps=max_steps),
         }
 
     def update_learning_rate(self, iteration):
@@ -241,13 +230,18 @@ class SparseAnchorMotionModel:
             g['lr'] = self._sched[g['name']](t)
 
     def _params(self):
-        return (('dx', self._dx), ('drot', self._drot), ('dscale', self._dscale))
+        return (('dx', self._dx), ('drot', self._drot), ('dscale', self._dscale),
+                ('beta', self._beta), ('gate', self._gate))
 
     def _replace_params(self, new, keep_state_fn=None):
-        """Swap the four parameter tensors (new: dict name->tensor). Optimizer moments are rebuilt
-        by keep_state_fn(name, exp_avg, exp_avg_sq)->(exp_avg, exp_avg_sq) or reset to zero."""
+        """Swap parameter tensors (new: dict name->tensor; groups absent from `new` are left untouched --
+        e.g. refine_anchors only swaps the anchor-indexed dx/drot/dscale, not the per-Gaussian beta).
+        Optimizer moments are rebuilt by keep_state_fn(name, exp_avg, exp_avg_sq)->(exp_avg, exp_avg_sq)
+        or reset to zero."""
         for g in self.optimizer.param_groups:
             name = g['name']
+            if name not in new:
+                continue
             old = g['params'][0]
             state = self.optimizer.state.pop(old, None)
             p = nn.Parameter(new[name].detach().contiguous().requires_grad_(True))
@@ -291,14 +285,16 @@ class SparseAnchorMotionModel:
         self.is_dyn = self.is_dyn[keep]
         self.knn_dirty = True
 
-    # ------------------------------------------------------------------ KNN graph (same-object scope, K=48)
+    # ------------------------------------------------------------------ KNN graph (K=48, whole point cloud)
     def build_knn(self, force=False):
         if not (self.knn_dirty or force):
             return
         dyn_idx = self.dyn_idx
         self._dyn_xyz = self.gaussians.get_xyz.detach()[dyn_idx]
-        # single self-graph over the dynamic object's own points only (no cross-object contamination,
-        # no control-node tier): every dynamic Gaussian's own motion is smoothed against its own object.
+        # self-graph over every Gaussian (no more segmentation-scoped subset): cross-object/background
+        # contamination is now handled softly by _twist_correct's motion-aware weight w_motion instead
+        # of a hard per-object graph boundary (two spatially-close but motion-different Gaussians --
+        # e.g. a moving object next to static background -- get a weak edge via w_motion, not zero).
         k = min(self.K, self._dyn_xyz.shape[0] - 1)
         self.nbr_idx, dist = knn_graph(self._dyn_xyz, k)
         self.nbr_w = knn_weights(dist)
@@ -341,9 +337,10 @@ class SparseAnchorMotionModel:
         return m, s, a0, a1
 
     def _tangent(self, side, m):
-        """Velocity/acceleration field at anchor a_m (side 'F') or a_{m+1} (side 'B') from the W nearest
-        intervals on that side, then degree-3 cubic-MLS-smoothed over the dynamic object's own KNN
-        graph (K=48). Returns (field [Ndyn,18], confidence [Ndyn,1])."""
+        """Velocity/acceleration field at anchor a_m (side 'F') or a_{m+1} (side 'B') from a Legendre-basis
+        fit (order self.basis_order) of the W nearest interval rates on that side, then Lie-consistent
+        local twist transport over the dynamic object's own KNN graph (K=48). Returns (field [Ndyn,18],
+        confidence [Ndyn,1])."""
         key = (side, m)
         if not self.training and key in self._tangent_cache:
             return self._tangent_cache[key]
@@ -364,36 +361,67 @@ class SparseAnchorMotionModel:
             us.append(self._rates(k, dx[i:i + 2], q[i:i + 2], dl[i:i + 2], dt))
             taus.append(0.5 * (times[k] + times[k + 1]).item())
             ws.append(1.0 / (1.0 + abs(k - m)))
-        v, a = _wls_line_fit(taus, ws, torch.stack(us), t_star)
-        if self.order < 2:
-            a = torch.zeros_like(a)
+        # Legendre-basis fit of u(tau) (order up to self.basis_order, degraded near window edges where
+        # fewer samples are available) -- replaces the old 2-point (v, a) constant-acceleration line fit.
+        # The fitted coefficients are then evaluated (value + derivative) at tau=t_star for the existing
+        # Taylor-transport step below, so this is a drop-in quality upgrade of that estimate.
+        C, s = _wls_basis_fit(taus, ws, us, t_star, self.basis_order)
+        order = C.shape[0] - 1
+        P0, Pp0 = _legendre_values(0.0, order), _legendre_derivatives(0.0, order)
+        v = sum(P0[p] * C[p] for p in range(order + 1))
+        a = sum(Pp0[p] * C[p] for p in range(order + 1)) / s
         field = torch.cat((v, a), dim=-1)                                     # [Ndyn, 18]
         conf = torch.ones(field.shape[0], 1, device=field.device)
         if self.nbr_idx is not None:
-            field, conf = self._mls_correct(field)
+            # motion signature a_i for the motion-aware KNN weight: velocity+omega Legendre coefficients
+            # only (decision: eta/scale-rate and higher-channel info excluded from the identity signature).
+            a_sig = C[..., 0:6].permute(1, 0, 2).reshape(C.shape[1], -1)
+            field_local, conf = self._twist_correct(field, a_sig)
+            # residual blend: u_final = u_self + beta_i * (u_local - u_self), beta_i = sigmoid(logit_i)
+            # trained per-Gaussian (see setup()); applied to both the value and slope/acceleration
+            # halves of `field` with the same beta_i (one trust level per Gaussian).
+            beta = torch.sigmoid(self._beta[0])                               # [Ndyn, 1]
+            field = field + beta * (field_local - field)
         out = (field, conf)
         if not self.training:
             self._tangent_cache[key] = out
         return out
 
-    def _mls_correct(self, field):
-        """Degree-3 cubic MLS smoothing of the rate/acceleration field over the dynamic object's own
-        KNN graph (K=48), using local coordinates normalized by each query point's own neighbour-
-        distance bandwidth. The polynomial's 0th-order term directly replaces `field` (no residual/
-        beta blend): it is a robust local estimate of the field at the query point itself, derived
-        only from same-object neighbours."""
+    def _twist_correct(self, field, a_sig):
+        """Lie-consistent local twist transport (replaces the old cubic-MLS spatial smoothing). Each KNN
+        neighbour j proposes a transported motion at i: v_{j->i} = v_j + omega_j x (x_i - x_j),
+        omega_{j->i} = omega_j, eta_{j->i} = eta_j -- the same formula is applied to both the value and
+        the slope/acceleration halves of `field` (valid since x_i, x_j are fixed canonical positions, so
+        differentiating the transport formula w.r.t. time commutes through the constant lever arm).
+        Proposals are aggregated with w_ij = w_geo_ij * w_motion_ij: w_geo is the existing adaptive
+        spatial kernel (`knn_weights`, same bandwidth convention as before); w_motion is a matching
+        adaptive kernel over the per-Gaussian temporal-basis coefficients `a_sig` (velocity+omega only),
+        so two spatially-close Gaussians whose fitted trajectories disagree get a weak edge."""
         xyz = self._dyn_xyz
         nbr = self.nbr_idx                                                    # [Ndyn,K] local indices
-        w = self.nbr_w
-        dx = xyz[nbr] - xyz.unsqueeze(1)                                      # [Ndyn,K,3]
-        bandwidth = dx.norm(dim=-1).mean(dim=1, keepdim=True).clamp_min(1e-8)
-        dx_n = dx / bandwidth.unsqueeze(-1)                                   # normalized local coordinates
-        field_nbr = field[nbr]                                               # [Ndyn,K,18]
-        field, res = cubic_mls_fit(dx_n, w, field_nbr, self.wls_eps)
+        lever = xyz.unsqueeze(1) - xyz[nbr]                                   # [Ndyn,K,3] (x_i - x_j)
+        w_geo = self.nbr_w
+        a_dist = (a_sig[nbr] - a_sig.unsqueeze(1)).norm(dim=-1)
+        w_motion = knn_weights(a_dist)
+        w = w_geo * w_motion
+        wsum = w.sum(1, keepdim=True).clamp_min(1e-8)
+
+        field_nbr = field[nbr]                                                # [Ndyn,K,18]
+        halves = []
+        value_prop = None
+        for h0 in (0, 9):
+            v_j, om_j, eta_j = field_nbr[..., h0:h0 + 3], field_nbr[..., h0 + 3:h0 + 6], field_nbr[..., h0 + 6:h0 + 9]
+            v_t = v_j + torch.linalg.cross(om_j, lever, dim=-1)
+            prop = torch.cat((v_t, om_j, eta_j), dim=-1)                      # [Ndyn,K,9]
+            if h0 == 0:
+                value_prop = prop
+            halves.append((w.unsqueeze(-1) * prop).sum(1) / wsum)
+        field = torch.cat(halves, dim=-1)                                     # [Ndyn,18]
+
         conf = torch.ones(field.shape[0], 1, device=field.device)
         if self.use_confidence:
-            wsum = w.sum(1, keepdim=True).clamp_min(1e-8)
-            msr = (w.unsqueeze(-1) * res[..., :9].detach() ** 2).sum(1) / wsum   # [Ndyn,9]
+            res = value_prop - halves[0].unsqueeze(1)                        # disagreement of proposals
+            msr = (w.unsqueeze(-1) * res.detach() ** 2).sum(1) / wsum         # [Ndyn,9]
             r = 0.0
             groups = ((0, 3), (3, 6), (6, 9))   # v, omega, eta
             for g0, g1 in groups:
@@ -431,16 +459,24 @@ class SparseAnchorMotionModel:
 
     def deltas_at(self, t):
         """Deltas for all N Gaussians in the additive convention expected by gaussian_renderer.render:
-        (d_xyz, d_rotation, d_scaling, info). Opacity is never deformed."""
+        (d_xyz, d_rotation, d_scaling, info). Opacity is never deformed. A learned per-Gaussian gate
+        g_i = sigmoid(gate_logit_i) (see setup()) continuously scales how much of the reconstructed
+        motion is actually applied -- rotation is gated by slerping from identity to q_hat by g_i
+        (the geometrically correct analogue of scaling a rotation vector), translation/log-scale by a
+        plain multiply."""
         gs = self.gaussians
         N = gs.get_xyz.shape[0]
         x_hat, q_hat, l_hat, info = self.query(t)
         dyn_idx = self.dyn_idx
         r_c = quat_normalize(gs._rotation[dyn_idx])
         l_can = gs._scaling[dyn_idx]
-        d_xyz = torch.zeros(N, 3, device='cuda').index_put((dyn_idx,), x_hat)
-        d_rot = torch.zeros(N, 4, device='cuda').index_put((dyn_idx,), quat_mul(q_hat, r_c) - r_c)
-        d_scale = torch.zeros(N, 3, device='cuda').index_put((dyn_idx,), torch.exp(l_can + l_hat) - torch.exp(l_can))
+        g = torch.sigmoid(self._gate[0])                                     # [Ndyn, 1]
+        id_q = torch.zeros_like(q_hat)
+        id_q[:, 0] = 1.0
+        q_gated = quat_slerp(id_q, q_hat, g)
+        d_xyz = torch.zeros(N, 3, device='cuda').index_put((dyn_idx,), g * x_hat)
+        d_rot = torch.zeros(N, 4, device='cuda').index_put((dyn_idx,), quat_mul(q_gated, r_c) - r_c)
+        d_scale = torch.zeros(N, 3, device='cuda').index_put((dyn_idx,), torch.exp(l_can + g * l_hat) - torch.exp(l_can))
         return d_xyz, d_rot, d_scale, info
 
     def step(self, xyz, time_input):
@@ -497,9 +533,10 @@ class SparseAnchorMotionModel:
 
     # ------------------------------------------------------------------ change score (storage sparsification)
     def _score_denominator(self):
-        """Object-bounding-radius denominator (was each Gaussian's own ~1e-3-extent scale, which made
-        every motion look huge and defeated the dynamic-set/storage thresholds): a single scalar
-        describing the dynamic object's own spatial extent, set once at freeze time."""
+        """Denominator for the storage change-score. `object_radius` is never set anymore (no more
+        one-shot background freeze, see setup()/deltas_at()'s learned gate instead), so this always
+        falls back to the scene-level `extent` -- every Gaussian is a candidate dynamic Gaussian now,
+        there is no single frozen "dynamic object" subset to compute a tighter bounding radius from."""
         return max(self.object_radius or self.extent, 1e-6)
 
     def change_score(self, dx, drot, dl, denom):
@@ -509,35 +546,6 @@ class SparseAnchorMotionModel:
         d_r = drot.norm(dim=-1) / self.kappa_rot
         d_s = dl.abs().amax(dim=-1) / self.kappa_scale
         return torch.max(torch.max(d_x, d_r), d_s)
-
-    # ------------------------------------------------------------------ background freeze (segmentation)
-    @torch.no_grad()
-    def freeze_background(self, tau_w):
-        """One-shot: freeze every Gaussian the mask-vote splat never confidently called dynamic
-        (get_dyn_prob<=0.5 or not-yet-visible-enough, dyn_w<=tau_w). Every surviving dynamic Gaussian
-        keeps its own independently-optimised anchor deltas (no control-node subsampling) -- the
-        segmentation mask only scopes the KNN graph/cubic-MLS smoothing to the dynamic object itself."""
-        gs = self.gaussians
-        dyn_idx = self.dyn_idx
-        keep_local = (gs.get_dyn_prob[dyn_idx] > 0.5) & (gs.dyn_w[dyn_idx] > tau_w)
-        N = self.is_dyn.shape[0]
-        keep_full = torch.zeros(N, dtype=torch.bool, device='cuda')
-        keep_full[dyn_idx[keep_local]] = True
-
-        new = {name: p.data[:, keep_local] for name, p in self._params()}
-        self._replace_params(new, lambda n, ea, es: (ea[:, keep_local], es[:, keep_local]))
-        n_before = int(self.is_dyn.sum())
-        self.is_dyn = keep_full
-        print("[SparseAnchor] background freeze: {} -> {} dynamic Gaussians ({:.1f}%), mask-vote driven".format(
-            n_before, int(keep_full.sum()), 100.0 * keep_full.float().mean().item()))
-
-        dyn_idx = self.dyn_idx   # refreshed post-freeze
-        xyz_dyn = gs.get_xyz.detach()[dyn_idx]
-        centroid = xyz_dyn.mean(0)
-        self.object_radius = float((xyz_dyn - centroid).norm(dim=-1).quantile(0.95).clamp_min(1e-6))
-        self.knn_dirty = True
-        print("[SparseAnchor] dynamic object: {} Gaussians, object_radius={:.4f}".format(
-            int(self.is_dyn.sum()), self.object_radius))
 
     # ------------------------------------------------------------------ coarse-to-fine anchors
     @torch.no_grad()
@@ -591,7 +599,7 @@ class SparseAnchorMotionModel:
         dense = self._dense_from_params() if self._dx is not None else self._dense_from_sparse()
         S = self._encode(dense, eps)
         meta = {
-            'A': self.A, 'W': self.W, 'K': self.K, 'order': self.order, 'sigma_c': self.sigma_c,
+            'A': self.A, 'W': self.W, 'K': self.K, 'basis_order': self.basis_order, 'sigma_c': self.sigma_c,
             'use_confidence': self.use_confidence, 'epsilon': eps,
             'kappa_rot': self.kappa_rot, 'kappa_scale': self.kappa_scale,
             'wls_eps': self.wls_eps, 'extent': self.extent, 'object_radius': self.object_radius,
@@ -600,6 +608,8 @@ class SparseAnchorMotionModel:
         np.savez(os.path.join(out_dir, "motion.npz"),
                  anchor_times=self.anchor_times.cpu().numpy().astype(np.float32),
                  dyn_idx=self.dyn_idx.cpu().numpy().astype(np.int32),
+                 beta_logit=self._beta[0].detach().cpu().numpy().astype(np.float32),
+                 gate_logit=self._gate[0].detach().cpu().numpy().astype(np.float32),
                  meta=json.dumps(meta), **{
                      k: (v.numpy() if torch.is_tensor(v) else v) for k, v in S.items()})
         self._report_storage(S, dense.shape, out_dir)
@@ -624,9 +634,9 @@ class SparseAnchorMotionModel:
         path = os.path.join(model_path, "motion", "iteration_{}".format(iteration), "motion.npz")
         z = np.load(path, allow_pickle=False)
         meta = json.loads(str(z['meta']))
-        for k in ('A', 'W', 'K', 'order', 'sigma_c'):
-            setattr(args, {'A': 'anchor_stride', 'W': 'temporal_window', 'K': 'knn_k', 'order': 'transport_order',
-                           'sigma_c': 'consensus_sigma'}[k], meta[k])
+        for k in ('A', 'W', 'K', 'basis_order', 'sigma_c'):
+            setattr(args, {'A': 'anchor_stride', 'W': 'temporal_window', 'K': 'knn_k',
+                           'basis_order': 'temporal_basis_order', 'sigma_c': 'consensus_sigma'}[k], meta[k])
         args.no_fit_confidence = not meta['use_confidence']
         args.score_kappa_rot, args.score_kappa_scale = meta['kappa_rot'], meta['kappa_scale']
         args.wls_eps = meta['wls_eps']
@@ -646,6 +656,8 @@ class SparseAnchorMotionModel:
         self.anchor_times = torch.from_numpy(z['anchor_times']).float().cuda()
         self.is_dyn = torch.zeros(N, dtype=torch.bool, device='cuda')
         self.is_dyn[torch.from_numpy(z['dyn_idx'].astype(np.int64)).cuda()] = True
+        self._beta = torch.from_numpy(z['beta_logit']).float().cuda().unsqueeze(0)
+        self._gate = torch.from_numpy(z['gate_logit']).float().cuda().unsqueeze(0)
         self._set_sparse({k: z[k] for k in ('rec_counts', 'rec_idx', 'rec_val')}, fill_k=meta['K'])
         n_rec = int(z['rec_counts'].sum())
         print("[SparseAnchor] loaded {}: {} anchors, {} dynamic / {} Gaussians, {} sparse records".format(

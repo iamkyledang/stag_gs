@@ -89,14 +89,12 @@ def training(dataset, opt, pipe, sparse_anchor, testing_iterations, saving_itera
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        # ---- sparse-anchor motion schedule: warm-up -> coarse-to-fine anchors -> dynamic-set selection
+        # ---- sparse-anchor motion schedule: warm-up -> coarse-to-fine anchors -> learned dyn/static gate
         if iteration == opt.warm_up and not motion.active:
             motion.setup(gaussians, opt)
         if motion.active:
             if iteration in sparse_anchor.anchor_refine_iters:
                 motion.refine_anchors(iteration)
-            if iteration == sparse_anchor.dyn_select_iter:
-                motion.freeze_background(sparse_anchor.dyn_w_min)
             if iteration % sparse_anchor.knn_update_interval == 0:
                 motion.knn_dirty = True
 
