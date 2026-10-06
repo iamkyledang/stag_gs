@@ -126,19 +126,18 @@ class SparseAnchorParams(ParamGroup):
         # representation (A, W, K)
         self.anchor_stride = 8            # A: anchors every A training frames (after coarse-to-fine)
         self.temporal_window = 2          # W: anchor intervals used on each side of the query
-        self.knn_k = 48                   # K: spatial neighbourhood size (whole point cloud, Lie twist transport)
-        self.temporal_basis_order = 3      # P: Legendre-basis degree fit to each anchor-window's rate series
-                                            # (replaces the old 2-point (v,a) constant-acceleration line fit)
+        self.knn_k = 48                   # K: spatial neighbourhood size (same-object graph, degree-3 cubic MLS)
+        self.transport_order = 2          # 1 = velocity only (W=1 -> pure LERP), 2 = velocity + acceleration
         self.consensus_sigma = 1.0        # softness of the fit-residual confidence in lambda_i
         self.no_fit_confidence = False    # lambda_i = time weight only
         self.wls_eps = 1e-2               # relative Tikhonov term epsilon_J in the cubic MLS fit
         # from-scratch training schedule
         self.coarse_levels = 3            # start at stride A*2^levels
         self.anchor_refine_iters = [5000, 7000, 9000]
+        self.dyn_select_iter = 11000      # one-shot background freeze (segmentation-driven dynamic/static split)
+        self.dyn_w_min = 10.0             # min accumulated mask-vote visibility to trust get_dyn_prob at freeze
         self.knn_update_interval = 1000
-        # mask-vote splatting (dynamic/static segmentation prior, see change_log) -- vestigial as of the
-        # learned dyn/static gate (see motion_gate_init/motion_gate_lr below): still accumulated every
-        # iteration (gaussians.accumulate_dyn_votes) but no longer consumed by the motion model.
+        # mask-vote splatting (dynamic/static segmentation prior, see change_log)
         self.mask_vote_decay = 0.999        # EMA factor per iteration on the per-Gaussian vote sums (~1000-iter memory)
         # storage sparsification (object-bounding-radius denominator, see change_log)
         self.epsilon = 0.05               # normalised change score above which a dynamic Gaussian's delta is stored
@@ -151,18 +150,9 @@ class SparseAnchorParams(ParamGroup):
         # learning rates (exponential decay to 10% of init, rescoped to start at warm_up/each refine -- see
         # SparseAnchorMotionModel._rebuild_schedule)
         self.motion_lr_init = 0.0008
+        self.motion_lr_final = 0.00008
         self.motion_rot_lr = 0.001
         self.motion_scale_lr = 0.001
-        # residual blend u_final = u_self + beta_i*(u_local-u_self), beta_i = sigmoid(logit_i), one
-        # learnable scalar per dynamic Gaussian (see SparseAnchorMotionModel.setup/_tangent)
-        self.motion_beta_init = 0.02      # initial beta_i (near 0: trust each Gaussian's own anchor motion first)
-        self.motion_beta_lr = 0.005
-        # dynamic/static gate g_i = sigmoid(logit_i), trained end-to-end purely by the photometric +
-        # regularization loss (no mask/BCE supervision) -- replaces the old one-shot freeze_background
-        # split (see SparseAnchorMotionModel.setup/deltas_at)
-        self.motion_gate_init = 0.98      # initial g_i (near 1: apply full motion by default, matching
-                                           # the old pre-freeze behaviour; gate only learns to suppress)
-        self.motion_gate_lr = 0.005
         super().__init__(parser, "Sparse Anchor Motion Parameters", sentinel, config_section="sparse_anchor")
 
 
