@@ -1,0 +1,95 @@
+﻿{
+  "model": {
+    "sh_degree": 3,
+    "images": "images",
+    "resolution": -1,
+    "white_background": false,
+    "data_device": "cuda",
+    "eval": true,
+    "load2gpu_on_the_fly": true
+  },
+
+  "optimization": {
+    "iterations": 40000,
+    "warm_up": 3000,
+
+    "position_lr_init": 0.00016,
+    "position_lr_final": 0.0000016,
+    "position_lr_delay_mult": 0.01,
+    "position_lr_max_steps": 40000,
+
+    "feature_lr": 0.0025,
+    "opacity_lr": 0.05,
+    "scaling_lr": 0.001,
+    "rotation_lr": 0.001,
+
+    "percent_dense": 0.01,
+    "lambda_dssim": 0.2,
+
+    "densification_interval": 100,
+    "opacity_reset_interval": 3000,
+    "densify_from_iter": 500,
+    "densify_until_iter": 16000,
+    "densify_grad_threshold": 0.0006
+  },
+
+  "sparse_anchor": {
+    "anchor_stride": 4,
+    "temporal_window": 2,
+    "knn_k": 48,
+    "transport_order": 2,
+
+    "consensus_sigma": 1.0,
+    "no_fit_confidence": false,
+    "wls_eps": 0.01,
+
+    "coarse_levels": 3,
+    "anchor_refine_iters": [5000, 7000, 9000],
+
+    "dyn_select_iter": 6000,
+    "dyn_w_min": 10.0,
+
+    "knn_update_interval": 1000,
+    "mask_vote_decay": 0.999,
+
+    "epsilon": 0.0,
+    "score_kappa_rot": 0.2,
+    "score_kappa_scale": 0.2,
+
+    "lambda_rigid": 0.3,
+    "lambda_temporal": 0.05,
+    "lambda_scale": 0.3,
+
+    "motion_lr_init": 0.0008,
+    "motion_rot_lr": 0.001,
+    "motion_scale_lr": 0.001
+  },
+
+  "train": {
+    "test_iterations": [
+      10000,
+      15000,
+      20000,
+      25000,
+      30000,
+      35000,
+      40000
+    ],
+
+    "save_iterations": [
+      15000,
+      20000,
+      25000,
+      30000,
+      35000,
+      40000
+    ],
+
+    "checkpoint_iterations": [
+      1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000,
+      11000, 12000, 13000, 14000, 15000, 16000, 17000, 18000, 19000, 20000,
+      21000, 22000, 23000, 24000, 25000, 26000, 27000, 28000, 29000, 30000,
+      31000, 32000, 33000, 34000, 35000, 36000, 37000, 38000, 39000, 40000
+    ]
+  }
+}
