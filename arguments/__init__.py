@@ -18,7 +18,7 @@ import os
 # CLI flags still override whatever is loaded here.
 _CONFIGS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs.json")
 try:
-    with open(_CONFIGS_PATH) as _f:
+    with open(_CONFIGS_PATH, encoding="utf-8-sig") as _f:
         CONFIGS = json.load(_f)
 except FileNotFoundError:
     CONFIGS = {}

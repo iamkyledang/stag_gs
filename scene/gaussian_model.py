@@ -413,7 +413,7 @@ class GaussianModel:
                                    parent_idx=parent_idx)
 
         prune_filter = torch.cat(
-            (selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+            (selected_pts_mask, torch.zeros(N * int(selected_pts_mask.sum()), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
