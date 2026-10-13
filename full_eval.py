@@ -61,8 +61,20 @@ def run_pipeline(source, model):
         # omitted: configs.json's "model"/"optimization"/"train" sections supply them. Passing any of
         # these store_true flags here would force them True on the CLI and silently override configs.json.
         os.system(f"python train.py -s {source} -m {model}")
-    os.system(f"python render.py -s {source} -m {model} --iteration {args.iteration} --mode render --skip_train")
-    os.system(f"python metrics.py -m \"{model}\"")
+
+    # comparison.mp4 is the last file render_set() writes, so its presence (not just the renders/
+    # folder, which is created up front) means the test-split render for this iteration finished.
+    render_done = os.path.join(model, "test", f"ours_{args.iteration}", "comparison.mp4")
+    if os.path.isfile(render_done):
+        print(f"Skipping render for {model}: {render_done} already exists")
+    else:
+        os.system(f"python render.py -s {source} -m {model} --iteration {args.iteration} --mode render --skip_train")
+
+    results_json = os.path.join(model, "results.json")
+    if os.path.isfile(results_json):
+        print(f"Skipping metrics for {model}: {results_json} already exists")
+    else:
+        os.system(f"python metrics.py -m \"{model}\"")
 
 
 def full_eval_all(root, tag):
