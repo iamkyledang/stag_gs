@@ -47,67 +47,42 @@ def discover_scenes(root):
     return sorted(name for name in os.listdir(root) if os.path.isdir(os.path.join(root, name)))
 
 
-def train_scenes_all(root, tag):
-    for scene in discover_scenes(root):
-        source = os.path.join(root, scene)
-        model = os.path.join(args.output_path, tag, scene)
-        if os.path.isdir(model):
-            print(f"Skipping training for {scene}: {model} already exists")
-            continue
+def run_pipeline(source, model):
+    """train -> render -> metrics for a single scene, in that order, so a crash/early stop leaves
+    complete, evaluated scenes behind instead of all-trained-but-nothing-evaluated."""
+    # model_path is created by train.py's prepare_output_and_logger() before a single iteration
+    # runs, so checking for the dir alone would wrongly "skip" a crashed/partial run; the final
+    # point_cloud.ply (scene/__init__.py's Scene.save) only exists once training actually finished.
+    final_ply = os.path.join(model, "point_cloud", f"iteration_{args.iteration}", "point_cloud.ply")
+    if os.path.isfile(final_ply):
+        print(f"Skipping training for {model}: {final_ply} already exists")
+    else:
         # eval/load2gpu_on_the_fly/quiet/iterations/test_iterations/save_iterations intentionally
         # omitted: configs.json's "model"/"optimization"/"train" sections supply them. Passing any of
         # these store_true flags here would force them True on the CLI and silently override configs.json.
         os.system(f"python train.py -s {source} -m {model}")
+    os.system(f"python render.py -s {source} -m {model} --iteration {args.iteration} --mode render --skip_train")
+    os.system(f"python metrics.py -m \"{model}\"")
 
 
-def render_scenes_all(root, tag):
+def full_eval_all(root, tag):
     for scene in discover_scenes(root):
         source = os.path.join(root, scene)
         model = os.path.join(args.output_path, tag, scene)
-        os.system(
-            f"python render.py -s {source} -m {model} --iteration {args.iteration} --mode render --skip_train"
-        )
+        run_pipeline(source, model)
 
 
-def metrics_for_all(root, tag):
-    models = " ".join(f"\"{os.path.join(args.output_path, tag, scene)}\"" for scene in discover_scenes(root))
-    os.system(f"python metrics.py -m {models}")
-
-
-def train_scenes(root, tag, scenes):
+def full_eval_scenes(root, tag, scenes):
     for scene, rel_path in scenes.items():
         source = os.path.join(root, rel_path)
         model = os.path.join(args.output_path, tag, scene)
-        if os.path.isdir(model):
-            print(f"Skipping training for {scene}: {model} already exists")
-            continue
-        # eval/iterations/test_iterations/save_iterations intentionally omitted: configs.json's
-        # "model"/"optimization"/"train" sections supply them
-        os.system(f"python train.py -s {source} -m {model}")
-
-
-def render_scenes(root, tag, scenes):
-    for scene, rel_path in scenes.items():
-        source = os.path.join(root, rel_path)
-        model = os.path.join(args.output_path, tag, scene)
-        os.system(
-            f"python render.py -s {source} -m {model} --iteration {args.iteration} --mode render --skip_train"
-        )
-
-
-def metrics_for(tag, scenes):
-    models = " ".join(f"\"{os.path.join(args.output_path, tag, scene)}\"" for scene in scenes)
-    os.system(f"python metrics.py -m {models}")
+        run_pipeline(source, model)
 
 
 if __name__ == "__main__":
     # ---------------- NeRF-DS (all scenes under NERF_DS_ROOT) ----------------
-    train_scenes_all(NERF_DS_ROOT, "nerf_ds")
-    render_scenes_all(NERF_DS_ROOT, "nerf_ds")
-    metrics_for_all(NERF_DS_ROOT, "nerf_ds")
+    full_eval_all(NERF_DS_ROOT, "nerf_ds")
 
     # ---------------- HyperNeRF (interp) ----------------
     # disabled for now
-    # train_scenes(HYPERNERF_ROOT, "hypernerf", HYPERNERF_SCENES)
-    # render_scenes(HYPERNERF_ROOT, "hypernerf", HYPERNERF_SCENES)
-    # metrics_for("hypernerf", HYPERNERF_SCENES)
+    # full_eval_scenes(HYPERNERF_ROOT, "hypernerf", HYPERNERF_SCENES)
