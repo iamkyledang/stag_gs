@@ -7,7 +7,7 @@
     "white_background": false,
     "data_device": "cuda",
     "eval": true,
-    "load2gpu_on_the_fly": true
+    "load2gpu_on_the_fly": false
   },
 
   "optimization": {
