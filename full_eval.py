@@ -3,15 +3,29 @@
 # train -> render (test split) -> metrics, run on every scene under datasets/nerf_ds.
 # HyperNeRF (interp) is wired up but disabled for now, matching full_eval.sh.
 #
+# All training hyperparameters (iterations, test_iterations, save_iterations, etc.) come from
+# configs.json -- train.py/arguments.py already load it as the default for every flag we don't
+# pass explicitly, so train_scenes*/train_scenes_all below must NOT override --iterations,
+# --test_iterations or --save_iterations on the command line, or they'd silently win over configs.json.
+#
 # Usage:
-#   python full_eval.py [--output_path ./output] [--iteration 20000]
+#   python full_eval.py [--output_path ./output] [--iteration <iter>]
+#   (--iteration defaults to configs.json's final save_iterations entry; only pass it to render/
+#   evaluate a different checkpoint than the one configs.json trains to.)
 
 import os
 from argparse import ArgumentParser
 
+from arguments import CONFIGS
+
+_train_cfg = CONFIGS.get("train", {})
+_opt_cfg = CONFIGS.get("optimization", {})
+# the checkpoint training actually ends on, per configs.json (not a hardcoded guess)
+_DEFAULT_ITERATION = _opt_cfg.get("iterations") or max(_train_cfg.get("save_iterations", [20000]))
+
 parser = ArgumentParser(description="Full evaluation script parameters")
 parser.add_argument("--output_path", default="./output")
-parser.add_argument("--iteration", default=20000, type=int)
+parser.add_argument("--iteration", default=_DEFAULT_ITERATION, type=int)
 args = parser.parse_args()
 
 NERF_DS_ROOT = "datasets/nerf_ds"
@@ -40,10 +54,10 @@ def train_scenes_all(root, tag):
         if os.path.isdir(model):
             print(f"Skipping training for {scene}: {model} already exists")
             continue
-        os.system(
-            f"python train.py -s {source} -m {model} --eval --load2gpu_on_the_fly --quiet "
-            f"--iterations {args.iteration} --test_iterations {args.iteration} --save_iterations {args.iteration}"
-        )
+        # eval/load2gpu_on_the_fly/quiet/iterations/test_iterations/save_iterations intentionally
+        # omitted: configs.json's "model"/"optimization"/"train" sections supply them. Passing any of
+        # these store_true flags here would force them True on the CLI and silently override configs.json.
+        os.system(f"python train.py -s {source} -m {model}")
 
 
 def render_scenes_all(root, tag):
@@ -51,7 +65,7 @@ def render_scenes_all(root, tag):
         source = os.path.join(root, scene)
         model = os.path.join(args.output_path, tag, scene)
         os.system(
-            f"python render.py -s {source} -m {model} --iteration {args.iteration} --mode render --skip_train --quiet"
+            f"python render.py -s {source} -m {model} --iteration {args.iteration} --mode render --skip_train"
         )
 
 
@@ -67,10 +81,9 @@ def train_scenes(root, tag, scenes):
         if os.path.isdir(model):
             print(f"Skipping training for {scene}: {model} already exists")
             continue
-        os.system(
-            f"python train.py -s {source} -m {model} --eval --load2gpu_on_the_fly --quiet "
-            f"--iterations {args.iteration} --test_iterations {args.iteration} --save_iterations {args.iteration}"
-        )
+        # eval/iterations/test_iterations/save_iterations intentionally omitted: configs.json's
+        # "model"/"optimization"/"train" sections supply them
+        os.system(f"python train.py -s {source} -m {model}")
 
 
 def render_scenes(root, tag, scenes):
@@ -78,7 +91,7 @@ def render_scenes(root, tag, scenes):
         source = os.path.join(root, rel_path)
         model = os.path.join(args.output_path, tag, scene)
         os.system(
-            f"python render.py -s {source} -m {model} --iteration {args.iteration} --mode render --skip_train --quiet"
+            f"python render.py -s {source} -m {model} --iteration {args.iteration} --mode render --skip_train"
         )
 
 
