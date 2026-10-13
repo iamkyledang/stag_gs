@@ -1,4 +1,5 @@
 ﻿{
+  "_comment": "Best Config run on RTX 3060 6GB VRAM",
   "model": {
     "sh_degree": 3,
     "images": "images",
