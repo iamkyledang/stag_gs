@@ -13,20 +13,10 @@ set -e
 
 OUTPUT_PATH="${1:-./output/eval}"
 ITERATION="${2:-20000}"
-NERF_DS_ROOT="../nerf_ds"
-HYPERNERF_ROOT="../hypernerf_interp"
+NERF_DS_ROOT="datasets/nerf_ds"
+HYPERNERF_ROOT="datasets/hypernerf_interp"
 
 # scene name -> path relative to the dataset root (the folder that holds dataset.json)
-declare -A NERF_DS_SCENES=(
-  [as]="as_novel_view"
-  [basin]="basin_novel_view"
-  [bell]="bell_novel_view"
-  [cup]="cup_novel_view"
-  [plate]="plate_novel_view"
-  [press]="press_novel_view"
-  [sieve]="sieve_novel_view"
-)
-
 declare -A HYPERNERF_SCENES=(
   [aleks-teapot]="interp_aleks-teapot/aleks-teapot"
   [chickchicken]="interp_chickchicken/chickchicken"
@@ -35,6 +25,42 @@ declare -A HYPERNERF_SCENES=(
   [slice-banana]="interp_slice-banana/slice-banana"
   [torchocolate]="interp_torchocolate/torchocolate"
 )
+
+# lists every immediate subfolder of $1 (each one a scene dir containing dataset.json)
+discover_scenes () {
+  local root="$1"
+  for dir in "$root"/*/; do
+    basename "$dir"
+  done
+}
+
+train_scenes_all () {
+  local root="$1" tag="$2"
+  while IFS= read -r scene; do
+    local source="$root/$scene"
+    local model="$OUTPUT_PATH/$tag/$scene"
+    python train.py -s "$source" -m "$model" --eval --load2gpu_on_the_fly --quiet \
+      --iterations "$ITERATION" --test_iterations "$ITERATION" --save_iterations "$ITERATION"
+  done < <(discover_scenes "$root")
+}
+
+render_scenes_all () {
+  local root="$1" tag="$2"
+  while IFS= read -r scene; do
+    local source="$root/$scene"
+    local model="$OUTPUT_PATH/$tag/$scene"
+    python render.py -s "$source" -m "$model" --iteration "$ITERATION" --mode render --skip_train --quiet
+  done < <(discover_scenes "$root")
+}
+
+metrics_for_all () {
+  local root="$1" tag="$2"
+  local models=()
+  while IFS= read -r scene; do
+    models+=("$OUTPUT_PATH/$tag/$scene")
+  done < <(discover_scenes "$root")
+  python metrics.py -m "${models[@]}"
+}
 
 train_scenes () {
   local root="$1" tag="$2"
@@ -67,16 +93,13 @@ metrics_for () {
   python metrics.py -m "${models[@]}"
 }
 
-# ---------------- NeRF-DS ----------------
-train_scenes "$NERF_DS_ROOT" "nerf_ds" NERF_DS_SCENES
-render_scenes "$NERF_DS_ROOT" "nerf_ds" NERF_DS_SCENES
-metrics_for "nerf_ds" NERF_DS_SCENES
+# ---------------- NeRF-DS (all scenes under $NERF_DS_ROOT) ----------------
+train_scenes_all "$NERF_DS_ROOT" "nerf_ds"
+render_scenes_all "$NERF_DS_ROOT" "nerf_ds"
+metrics_for_all "$NERF_DS_ROOT" "nerf_ds"
 
 # ---------------- HyperNeRF (interp) ----------------
-train_scenes "$HYPERNERF_ROOT" "hypernerf" HYPERNERF_SCENES
-render_scenes "$HYPERNERF_ROOT" "hypernerf" HYPERNERF_SCENES
-metrics_for "hypernerf" HYPERNERF_SCENES
-
-python train.py -s ../nerf_ds/as_novel_view -m output/as_novel_view 
-python render.py -m output/as_novel_view --mode render
-python metrics.py -m output/as_novel_view
+# disabled for now
+# train_scenes "$HYPERNERF_ROOT" "hypernerf" HYPERNERF_SCENES
+# render_scenes "$HYPERNERF_ROOT" "hypernerf" HYPERNERF_SCENES
+# metrics_for "hypernerf" HYPERNERF_SCENES
