@@ -6,12 +6,12 @@
 # Usage:
 #   ./full_eval.sh [output_path] [iteration]
 #
-# Defaults write results under ./output/eval/<dataset>/<scene> and use iteration 20000,
+# Defaults write results under ./output/<dataset>/<scene> and use iteration 20000,
 # matching the checkpoint saved by train.py's --save_iterations.
 
 set -e
 
-OUTPUT_PATH="${1:-./output/eval}"
+OUTPUT_PATH="${1:-./output}"
 ITERATION="${2:-20000}"
 NERF_DS_ROOT="datasets/nerf_ds"
 HYPERNERF_ROOT="datasets/hypernerf_interp"
