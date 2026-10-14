@@ -29,6 +29,7 @@ args = parser.parse_args()
 
 NERF_DS_ROOT = "datasets/nerf_ds"
 HYPERNERF_ROOT = "datasets/hypernerf_interp"
+DNERF_ROOT = "datasets/dnerf"
 
 # scene name -> path relative to the dataset root (the folder that holds dataset.json)
 HYPERNERF_SCENES = {
@@ -40,13 +41,25 @@ HYPERNERF_SCENES = {
     "torchocolate": "interp_torchocolate/torchocolate",
 }
 
+# scene name -> path relative to DNERF_ROOT (each folder holds transforms_train.json directly)
+DNERF_SCENES = {
+    "bouncingballs": "bouncingballs",
+    "hellwarrior": "hellwarrior",
+    "hook": "hook",
+    "jumpingjacks": "jumpingjacks",
+    "lego": "lego",
+    "mutant": "mutant",
+    "standup": "standup",
+    "trex": "trex",
+}
+
 
 def discover_scenes(root):
     """Every immediate subfolder of root (each one a scene dir containing dataset.json)."""
     return sorted(name for name in os.listdir(root) if os.path.isdir(os.path.join(root, name)))
 
 
-def run_pipeline(source, model):
+def run_pipeline(source, model, extra_train_args=""):
     """train -> render -> metrics for a single scene, in that order, so a crash/early stop leaves
     complete, evaluated scenes behind instead of all-trained-but-nothing-evaluated."""
     # model_path is created by train.py's prepare_output_and_logger() before a single iteration
@@ -59,7 +72,7 @@ def run_pipeline(source, model):
         # eval/load2gpu_on_the_fly/quiet/iterations/test_iterations/save_iterations intentionally
         # omitted: configs.json's "model"/"optimization"/"train" sections supply them. Passing any of
         # these store_true flags here would force them True on the CLI and silently override configs.json.
-        os.system(f"python train.py -s {source} -m {model}")
+        os.system(f"python train.py -s {source} -m {model} {extra_train_args}")
 
     # comparison.mp4 is the last file render_set() writes, so its presence (not just the renders/
     # folder, which is created up front) means the test-split render for this iteration finished.
@@ -83,11 +96,11 @@ def full_eval_all(root, tag):
         run_pipeline(source, model)
 
 
-def full_eval_scenes(root, tag, scenes):
+def full_eval_scenes(root, tag, scenes, extra_train_args=""):
     for scene, rel_path in scenes.items():
         source = os.path.join(root, rel_path)
         model = os.path.join(args.output_path, tag, scene)
-        run_pipeline(source, model)
+        run_pipeline(source, model, extra_train_args)
 
 
 if __name__ == "__main__":
@@ -96,3 +109,6 @@ if __name__ == "__main__":
 
     # ---------------- HyperNeRF (interp) ----------------
     full_eval_scenes(HYPERNERF_ROOT, "hypernerf", HYPERNERF_SCENES)
+
+    # ---------------- D-NeRF (Blender synthetic, white background, no masks) ----------------
+    full_eval_scenes(DNERF_ROOT, "dnerf", DNERF_SCENES, extra_train_args="--white_background")
