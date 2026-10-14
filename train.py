@@ -113,7 +113,7 @@ def training(dataset, opt, pipe, sparse_anchor, testing_iterations, saving_itera
         d_xyz, d_rotation, d_scaling, info = motion_deltas(motion, fid, ast_noise)
 
         # Render (+ visibility-weighted mask-vote splatting in the same pass when this frame has a
-        # dynamic-object mask; masks are missing for HyperNeRF until segmented, see generate_masks_sam2.py)
+        # dynamic-object mask; masks are missing for HyperNeRF until segmented, see generate_mask_hypernerf.py)
         render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling,
                                pix_label=viewpoint_cam.mask)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re[

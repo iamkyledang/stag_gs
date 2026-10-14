@@ -414,12 +414,13 @@ def readNerfiesCameras(path):
     # parent folder name (works with '/' and '\' separators); split type is taken from dataset.json keys
     name = os.path.basename(os.path.dirname(os.path.normpath(path)))
     has_split = 'train_ids' in dataset_json and 'val_ids' in dataset_json
+    is_nerf_ds = name.startswith('NeRF') or (has_split and not name.startswith('interp'))
     if name.startswith('vrig'):
         train_img = dataset_json['train_ids']
         val_img = dataset_json['val_ids']
         all_img = train_img + val_img
         ratio = 0.25
-    elif name.startswith('NeRF') or (has_split and not name.startswith('interp')):
+    elif is_nerf_ds:
         # NeRF-DS: camera 0 = training video, camera 1 = novel test view, evaluated at 480x270 (rgb/1x)
         train_img = dataset_json['train_ids']
         val_img = dataset_json['val_ids']
@@ -452,14 +453,14 @@ def readNerfiesCameras(path):
         camera['position'] = camera['position'] * coord_scale
         all_cam_params.append(camera)
 
-    # ids (pre-path) are also the mask filenames, at the same rgb/{ratio} resolution folder
+    # ids (pre-path) are also the mask filenames (flat mask/ folder, not split by rgb resolution)
     all_ids = all_img
     all_img = [f'{path}/rgb/{int(1 / ratio)}x/{i}.png' for i in all_ids]
-    mask_dir = f'{path}/mask/{int(1 / ratio)}x'
+    mask_dir = f'{path}/mask'
     has_masks = os.path.isdir(mask_dir)
     if not has_masks:
         print(f"[Mask] no '{mask_dir}' folder found: dynamic/static split will run without mask supervision "
-              "until one is generated (see generate_masks_sam2.py).")
+              "until one is generated (see generate_mask_hypernerf.py).")
 
     cam_infos = []
     for idx in range(len(all_img)):
@@ -470,9 +471,14 @@ def readNerfiesCameras(path):
 
         mask = None
         if has_masks:
-            mask_path = f'{mask_dir}/{all_ids[idx]}.png.png'
+            mask_path = f'{mask_dir}/{all_ids[idx]}_mask.png'
             if os.path.exists(mask_path):
                 mask = np.array(Image.open(mask_path).convert('L'))
+                if is_nerf_ds:
+                    # NeRF-DS ships masks inverted (white=static bg, black=dynamic fg) -- flip here so
+                    # every CameraInfo.mask uses the same convention regardless of dataset source:
+                    # high/white = dynamic foreground (matches generate_mask_hypernerf.py's SAM2 output).
+                    mask = 255 - mask
 
         orientation = all_cam_params[idx]['orientation'].T
         position = -all_cam_params[idx]['position'] @ orientation
