@@ -297,6 +297,14 @@ class SparseAnchorMotionModel:
             return
         dyn_idx = self.dyn_idx
         self._dyn_xyz = self.gaussians.get_xyz.detach()[dyn_idx]
+        if self._dyn_xyz.shape[0] == 0:
+            # no dynamic Gaussians survived freeze_background (e.g. a genuinely static scene with no
+            # mask supervision): nothing to build a neighbour graph over. _tangent's `nbr_idx is not
+            # None` check already skips MLS smoothing when this stays None.
+            self.nbr_idx = self.nbr_w = None
+            self.knn_dirty = False
+            self._tangent_cache.clear()
+            return
         # single self-graph over the dynamic object's own points only (no cross-object contamination,
         # no control-node tier): every dynamic Gaussian's own motion is smoothed against its own object.
         k = min(self.K, self._dyn_xyz.shape[0] - 1)
@@ -455,6 +463,12 @@ class SparseAnchorMotionModel:
         all over the dynamic point set only."""
         xyz = self._dyn_xyz
         Nf = xyz.shape[0]
+        if Nf == 0:
+            # nothing dynamic (no mask supervision ever voted a Gaussian dynamic): no rigidity/temporal/
+            # scale regularisation to compute, and self.nbr_idx is None so the neighbour-indexed code
+            # below would crash on it.
+            z = torch.zeros((), device='cuda')
+            return {'rigid': z, 'temporal': z, 'scale': z}
         M = self.num_anchors
         anchors = info['anchors']
         aid = torch.tensor([info['m'], info['m'] + 1], device='cuda', dtype=torch.long)
@@ -533,8 +547,15 @@ class SparseAnchorMotionModel:
 
         dyn_idx = self.dyn_idx   # refreshed post-freeze
         xyz_dyn = gs.get_xyz.detach()[dyn_idx]
-        centroid = xyz_dyn.mean(0)
-        self.object_radius = float((xyz_dyn - centroid).norm(dim=-1).quantile(0.95).clamp_min(1e-6))
+        if xyz_dyn.shape[0] == 0:
+            # no Gaussian ever got a confident dynamic vote (e.g. no mask supervision for this scene) --
+            # treat the whole scene as static instead of crashing quantile() on an empty tensor.
+            print("[SparseAnchor] background freeze: no dynamic Gaussians found (no mask supervision?) "
+                  "-- scene will train as fully static from here on.")
+            self.object_radius = self.extent
+        else:
+            centroid = xyz_dyn.mean(0)
+            self.object_radius = float((xyz_dyn - centroid).norm(dim=-1).quantile(0.95).clamp_min(1e-6))
         self.knn_dirty = True
         print("[SparseAnchor] dynamic object: {} Gaussians, object_radius={:.4f}".format(
             int(self.is_dyn.sum()), self.object_radius))

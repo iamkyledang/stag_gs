@@ -54,7 +54,7 @@
   "train": {
     "test_iterations": [24000],
     "save_iterations": [18000, 24000],
-    "checkpoint_iterations": [15000]
+    "checkpoint_iterations": [5000, 10000, 15000, 20000]
   }
 }
   
