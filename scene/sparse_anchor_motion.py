@@ -533,7 +533,18 @@ class SparseAnchorMotionModel:
         segmentation mask only scopes the KNN graph/cubic-MLS smoothing to the dynamic object itself."""
         gs = self.gaussians
         dyn_idx = self.dyn_idx
-        keep_local = (gs.get_dyn_prob[dyn_idx] > 0.5) & (gs.dyn_w[dyn_idx] > tau_w)
+        prob_ok = gs.get_dyn_prob[dyn_idx] > 0.5
+        weight_ok = gs.dyn_w[dyn_idx] > tau_w
+        keep_local = prob_ok & weight_ok
+        if int(keep_local.sum()) == 0 and dyn_idx.shape[0] > 0:
+            # Diagnostics to tell apart "masks never influenced any Gaussian" (w all ~0) from
+            # "votes exist but are below the tau_w confidence bar" (a threshold-tuning issue).
+            w = gs.dyn_w[dyn_idx]
+            p = gs.get_dyn_prob[dyn_idx]
+            print("[SparseAnchor] freeze diagnostics: {} candidates, {} with dyn_w>0, "
+                  "max dyn_w={:.3f}, dyn_w tau={:.3f}, {} pass prob>0.5 alone, {} pass dyn_w>tau alone".format(
+                      dyn_idx.shape[0], int((w > 0).sum()), float(w.max()) if w.numel() else 0.0, tau_w,
+                      int(prob_ok.sum()), int(weight_ok.sum())))
         N = self.is_dyn.shape[0]
         keep_full = torch.zeros(N, dtype=torch.bool, device='cuda')
         keep_full[dyn_idx[keep_local]] = True
@@ -680,9 +691,14 @@ class SparseAnchorMotionModel:
         dyn_idx = self.dyn_idx
         xyz_dyn = self.gaussians.get_xyz.detach()[dyn_idx]
         co = np.concatenate(([0], np.cumsum(S['rec_counts'])))
-        k = min(fill_k, xyz_dyn.shape[0] - 1)
-        nbr_idx, dist = knn_graph(xyz_dyn, k)
-        nbr_w = knn_weights(dist)
+        if xyz_dyn.shape[0] == 0:
+            # scene had no dynamic Gaussians at save time (e.g. no mask supervision): nothing to build
+            # a neighbour graph over, same as build_knn's guard for the live-training path.
+            nbr_idx = nbr_w = None
+        else:
+            k = min(fill_k, xyz_dyn.shape[0] - 1)
+            nbr_idx, dist = knn_graph(xyz_dyn, k)
+            nbr_w = knn_weights(dist)
         self.sparse = {
             'off': co,
             'rec_idx': torch.as_tensor(np.asarray(S['rec_idx']).astype(np.int64)).to(dev),
