@@ -1,7 +1,6 @@
 #
 # stag_gs benchmark driver (python version of full_eval.sh):
 # train -> render (test split) -> metrics, run on every scene under datasets/nerf_ds.
-# HyperNeRF (interp) is wired up but disabled for now, matching full_eval.sh.
 #
 # All training hyperparameters (iterations, test_iterations, save_iterations, etc.) come from
 # configs.json -- train.py/arguments.py already load it as the default for every flag we don't
@@ -93,8 +92,7 @@ def full_eval_scenes(root, tag, scenes):
 
 if __name__ == "__main__":
     # ---------------- NeRF-DS (all scenes under NERF_DS_ROOT) ----------------
-    full_eval_all(NERF_DS_ROOT, "nerf_ds")
+    # full_eval_all(NERF_DS_ROOT, "nerf_ds")
 
     # ---------------- HyperNeRF (interp) ----------------
-    # disabled for now
-    # full_eval_scenes(HYPERNERF_ROOT, "hypernerf", HYPERNERF_SCENES)
+    full_eval_scenes(HYPERNERF_ROOT, "hypernerf", HYPERNERF_SCENES)
