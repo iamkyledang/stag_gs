@@ -136,6 +136,12 @@ class SparseAnchorParams(ParamGroup):
         self.anchor_refine_iters = [5000, 7000, 9000]
         self.dyn_select_iter = 11000      # one-shot background freeze (segmentation-driven dynamic/static split)
         self.dyn_w_min = 10.0             # min accumulated mask-vote visibility to trust get_dyn_prob at freeze
+        self.ignore_mask = False          # force the motion-threshold fallback even if the dataset has masks
+        # mask-free fallback (scenes with zero mask supervision, see freeze_background_motion): Otsu's method
+        # picks the data-adaptive split point of each scene's own motion-magnitude distribution, so these two
+        # are universal safety constants, not per-scene tuning knobs.
+        self.motion_dyn_margin = 0.5      # <1 shrinks the Otsu cutoff toward the static cluster (keep uncertain dynamic)
+        self.motion_dyn_floor = 0.01      # absolute floor so a truly static scene's noise can't look "50% dynamic"
         self.knn_update_interval = 1000
         # mask-vote splatting (dynamic/static segmentation prior, see change_log)
         self.mask_vote_decay = 0.999        # EMA factor per iteration on the per-Gaussian vote sums (~1000-iter memory)
