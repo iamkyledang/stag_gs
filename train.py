@@ -46,6 +46,13 @@ def training(dataset, opt, pipe, sparse_anchor, testing_iterations, saving_itera
 
     T = count_train_frames(scene.getTrainCameras())
     motion = SparseAnchorMotionModel(sparse_anchor, T, scene.cameras_extent)
+    has_any_mask = (not sparse_anchor.ignore_mask) and any(cam.mask is not None for cam in scene.getTrainCameras())
+    if sparse_anchor.ignore_mask:
+        print("[SparseAnchor] --ignore_mask set -- dataset masks (if any) will not be used; dynamic/static "
+              "split at dyn_select_iter will use the motion-magnitude threshold (freeze_background_motion).")
+    elif not has_any_mask:
+        print("[SparseAnchor] no mask supervision found for this scene -- dynamic/static split at "
+              "dyn_select_iter will fall back to the motion-magnitude threshold (freeze_background_motion).")
 
     resumed_iteration = 0
     if start_checkpoint:
@@ -96,7 +103,10 @@ def training(dataset, opt, pipe, sparse_anchor, testing_iterations, saving_itera
             if iteration in sparse_anchor.anchor_refine_iters:
                 motion.refine_anchors(iteration)
             if iteration == sparse_anchor.dyn_select_iter:
-                motion.freeze_background(sparse_anchor.dyn_w_min)
+                if has_any_mask:
+                    motion.freeze_background(sparse_anchor.dyn_w_min)
+                else:
+                    motion.freeze_background_motion(sparse_anchor.motion_dyn_margin, sparse_anchor.motion_dyn_floor)
             if iteration % sparse_anchor.knn_update_interval == 0:
                 motion.knn_dirty = True
 
@@ -113,9 +123,11 @@ def training(dataset, opt, pipe, sparse_anchor, testing_iterations, saving_itera
         d_xyz, d_rotation, d_scaling, info = motion_deltas(motion, fid, ast_noise)
 
         # Render (+ visibility-weighted mask-vote splatting in the same pass when this frame has a
-        # dynamic-object mask; masks are missing for HyperNeRF until segmented, see generate_mask_hypernerf.py)
+        # dynamic-object mask; masks are missing for HyperNeRF until segmented, see generate_mask_hypernerf.py;
+        # --ignore_mask forces this to None even when the dataset has masks)
+        frame_mask = None if sparse_anchor.ignore_mask else viewpoint_cam.mask
         render_pkg_re = render(viewpoint_cam, gaussians, pipe, background, d_xyz, d_rotation, d_scaling,
-                               pix_label=viewpoint_cam.mask)
+                               pix_label=frame_mask)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re[
             "viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
 
@@ -156,7 +168,7 @@ def training(dataset, opt, pipe, sparse_anchor, testing_iterations, saving_itera
 
             # Mask-vote splatting: EMA-merge this frame's per-Gaussian votes (sized for the pre-densification
             # point set, so this must run before densify_and_prune below)
-            if viewpoint_cam.mask is not None:
+            if frame_mask is not None:
                 gaussians.accumulate_dyn_votes(render_pkg_re["dyn_votes_fg"], render_pkg_re["dyn_votes_w"],
                                                sparse_anchor.mask_vote_decay)
 

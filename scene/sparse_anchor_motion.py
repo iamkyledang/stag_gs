@@ -545,6 +545,69 @@ class SparseAnchorMotionModel:
                   "max dyn_w={:.3f}, dyn_w tau={:.3f}, {} pass prob>0.5 alone, {} pass dyn_w>tau alone".format(
                       dyn_idx.shape[0], int((w > 0).sum()), float(w.max()) if w.numel() else 0.0, tau_w,
                       int(prob_ok.sum()), int(weight_ok.sum())))
+        self._finalize_freeze(keep_local, "mask-vote")
+
+    # ------------------------------------------------------------------ background freeze (mask-free fallback)
+    @torch.no_grad()
+    def _motion_magnitude_rms(self):
+        """Per-Gaussian (pre-freeze, all N Gaussians) 'how much does this blob's learned anchor pose
+        actually change from one anchor to the next' -- RMS, not max, over the M-1 consecutive-anchor
+        differences so a single noisy anchor can't flip the verdict. This is the only signal available
+        when a scene has no mask supervision at all (see freeze_background_motion)."""
+        ddx = self._dx[1:] - self._dx[:-1]
+        ddr = self._drot[1:] - self._drot[:-1]
+        dds = self._dscale[1:] - self._dscale[:-1]
+        per_anchor = self.change_score(ddx, ddr, dds, self._score_denominator())   # [M-1, N]
+        return torch.sqrt((per_anchor ** 2).mean(dim=0))                           # [N]
+
+    @staticmethod
+    def _otsu_threshold(scores, nbins=256):
+        """Data-adaptive split point of a (typically bimodal: near-still background vs. the genuinely
+        moving object) 1-D distribution, maximising between-class variance. No manual per-scene tuning."""
+        s = scores.detach()
+        lo, hi = float(s.min()), float(s.max())
+        if s.numel() < 2 or (hi - lo) < 1e-12:
+            return lo
+        hist = torch.histc(s, bins=nbins, min=lo, max=hi)
+        edges = torch.linspace(lo, hi, nbins + 1, device=s.device)
+        centers = (edges[:-1] + edges[1:]) / 2
+        w_b = torch.cumsum(hist, dim=0)
+        w_f = hist.sum() - w_b
+        sum_b = torch.cumsum(hist * centers, dim=0)
+        sum_f = (hist * centers).sum() - sum_b
+        m_b = sum_b / w_b.clamp_min(1e-12)
+        m_f = sum_f / w_f.clamp_min(1e-12)
+        between_var = w_b * w_f * (m_b - m_f) ** 2
+        between_var[(w_b == 0) | (w_f == 0)] = -1.0
+        return float(centers[torch.argmax(between_var)])
+
+    @torch.no_grad()
+    def freeze_background_motion(self, margin, floor):
+        """Mask-free fallback for freeze_background: a scene with zero mask supervision has dyn_w==0
+        everywhere, so the mask-vote test would freeze 100% of Gaussians to static -- wrong. Instead
+        classify dynamic vs static from the Gaussians' own learned motion: Otsu's method finds the
+        data-adaptive split point of the per-Gaussian motion-magnitude distribution; `margin<1` shrinks
+        the cutoff towards the static cluster so uncertain/borderline Gaussians are kept dynamic rather
+        than prematurely frozen; `floor` is an absolute safety minimum so a genuinely static scene's
+        pure optimisation noise can't be split into a spurious "50% dynamic"."""
+        dyn_idx = self.dyn_idx
+        motion_score = self._motion_magnitude_rms()[dyn_idx]
+        otsu = self._otsu_threshold(motion_score)
+        threshold = max(otsu * margin, floor)
+        keep_local = motion_score > threshold
+        print("[SparseAnchor] freeze diagnostics (no mask supervision -> motion-threshold fallback): "
+              "{} candidates, otsu={:.4f}, margin={:.2f}, floor={:.4f} -> threshold={:.4f}, "
+              "max score={:.4f}".format(
+                  dyn_idx.shape[0], otsu, margin, floor, threshold,
+                  float(motion_score.max()) if motion_score.numel() else 0.0))
+        self._finalize_freeze(keep_local, "motion-threshold")
+
+    @torch.no_grad()
+    def _finalize_freeze(self, keep_local, method_label):
+        """Shared tail of freeze_background / freeze_background_motion: apply the keep mask, shrink the
+        anchor params, and (re)compute object_radius from the surviving dynamic point set."""
+        gs = self.gaussians
+        dyn_idx = self.dyn_idx
         N = self.is_dyn.shape[0]
         keep_full = torch.zeros(N, dtype=torch.bool, device='cuda')
         keep_full[dyn_idx[keep_local]] = True
@@ -553,16 +616,16 @@ class SparseAnchorMotionModel:
         self._replace_params(new, lambda n, ea, es: (ea[:, keep_local], es[:, keep_local]))
         n_before = int(self.is_dyn.sum())
         self.is_dyn = keep_full
-        print("[SparseAnchor] background freeze: {} -> {} dynamic Gaussians ({:.1f}%), mask-vote driven".format(
-            n_before, int(keep_full.sum()), 100.0 * keep_full.float().mean().item()))
+        print("[SparseAnchor] background freeze: {} -> {} dynamic Gaussians ({:.1f}%), {} driven".format(
+            n_before, int(keep_full.sum()), 100.0 * keep_full.float().mean().item(), method_label))
 
         dyn_idx = self.dyn_idx   # refreshed post-freeze
         xyz_dyn = gs.get_xyz.detach()[dyn_idx]
         if xyz_dyn.shape[0] == 0:
-            # no Gaussian ever got a confident dynamic vote (e.g. no mask supervision for this scene) --
-            # treat the whole scene as static instead of crashing quantile() on an empty tensor.
-            print("[SparseAnchor] background freeze: no dynamic Gaussians found (no mask supervision?) "
-                  "-- scene will train as fully static from here on.")
+            # nothing passed the test (e.g. a genuinely static scene) -- treat the whole scene as
+            # static instead of crashing quantile() on an empty tensor.
+            print("[SparseAnchor] background freeze: no dynamic Gaussians found ({}) "
+                  "-- scene will train as fully static from here on.".format(method_label))
             self.object_radius = self.extent
         else:
             centroid = xyz_dyn.mean(0)
