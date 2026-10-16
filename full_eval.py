@@ -105,10 +105,10 @@ def full_eval_scenes(root, tag, scenes, extra_train_args=""):
 
 if __name__ == "__main__":
     # ---------------- NeRF-DS (all scenes under NERF_DS_ROOT) ----------------
-    # full_eval_all(NERF_DS_ROOT, "nerf_ds")
+    full_eval_all(NERF_DS_ROOT, "nerf_ds")
 
     # ---------------- HyperNeRF (interp) ----------------
     # full_eval_scenes(HYPERNERF_ROOT, "hypernerf", HYPERNERF_SCENES)
 
     # ---------------- D-NeRF (Blender synthetic, white background, no masks) ----------------
-    full_eval_scenes(DNERF_ROOT, "dnerf", DNERF_SCENES, extra_train_args="--white_background")
+    # full_eval_scenes(DNERF_ROOT, "dnerf", DNERF_SCENES, extra_train_args="--white_background")
