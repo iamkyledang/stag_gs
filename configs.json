@@ -1,5 +1,5 @@
 ﻿{
-  "_comment": "Config for H100 40GB nerf_ds dataset, NO masks (ignore_mask=true, forces the Otsu motion-threshold freeze_background_motion even though mask/ and resized_mask/ exist on disk). dyn_select_iter moved to AFTER the last anchor_refine_iters entry (finest anchor resolution) instead of staying between refines like configs_nerf_ds_with_mask.json: without mask supervision the Otsu split needs the cleanest motion signal available, which only exists once anchors are at their finest level. nerf_ds's largest scenes (bell/cup ~850-880 exemplars) are in the same ballpark as hypernerf's worst case (~1734 frames), so this mirrors configs_hypernerf.json's reasoning. iterations/anchor_stride/knn_k left at their pre-H100 values: nerf_ds's native 480x270 resolution is far cheaper per-iteration than hypernerf or dnerf (800x800), so the existing 40000-iteration budget is expected to clear comfortably inside 2-3h on H100, but this has not been empirically timed -- validate with a short run and retune if it overshoots.",
+  "_comment": "Config for H100 20GB nerf_ds dataset, NO masks (ignore_mask=true, forces the Otsu motion-threshold freeze_background_motion). Revised 2026-10-17 after a real full_eval.py run on this exact GPU: as_novel_view finished 40000 iters in 4h23m (over the 2-3h target) at anchor_stride=4/M=213 peak; basin_novel_view and bell_novel_view both hit 'NVML_SUCCESS == r INTERNAL ASSERT FAILED ... CUDACachingAllocator' (a VRAM-exhaustion crash) at N=230-290k Gaussians while M was still mid-refine (111-168) and BEFORE/just-after the Otsu freeze -- i.e. the worst-case window where N (dense Gaussians, still growing via densification) and M (anchor count) are both large simultaneously. Fix mirrors the already-H100-tested configs_hypernerf.json recipe but goes further (anchor_stride 8 not 6, knn_k 32 not 40) since 20GB is half of the 40GB that config assumed and nerf_ds's observed Gaussian counts here (up to 286k) are larger than expected: anchor_stride 4->8 and coarse_levels 3->2 (drops the costly 213-anchor finest level entirely -- bell's own log shows M=111 at stride 8, which is exactly where it crashed transitioning toward 213), knn_k 48->32 (cuts the per-iteration O(N*K) _mls_correct/transport-fit cost, which is where bell's crash stack trace originated), densify_grad_threshold 0.0006->0.0009 and densify_until_iter 16000->12000 (curbs runaway Gaussian growth -- N hit 286k by iter 8000 under the old settings), dyn_select_iter moved earlier (9500->7000, now BETWEEN the two anchor_refine_iters instead of after) to shrink the dynamic-Gaussian tensor via background freeze sooner, reducing peak N*M memory even though the Otsu motion signal is slightly less refined. iterations cut 40000->20000 (as_novel_view's own 4h23m/40000-iter run implies ~2h11m for 20000 at the old slower settings; the above memory/compute cuts should make per-iteration speed similar or better, giving comfortable headroom under 2-3h). If NVML/allocator crashes recur, also try setting env var PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True before training, and/or cut anchor_stride further / densify_grad_threshold higher still.",
   "model": {
     "sh_degree": 3,
     "images": "images",
@@ -11,13 +11,13 @@
   },
 
   "optimization": {
-    "iterations": 40000,
+    "iterations": 20000,
     "warm_up": 3000,
 
     "position_lr_init": 0.00016,
     "position_lr_final": 0.0000016,
     "position_lr_delay_mult": 0.01,
-    "position_lr_max_steps": 40000,
+    "position_lr_max_steps": 20000,
 
     "feature_lr": 0.0025,
     "opacity_lr": 0.05,
@@ -30,24 +30,24 @@
     "densification_interval": 100,
     "opacity_reset_interval": 3000,
     "densify_from_iter": 500,
-    "densify_until_iter": 16000,
-    "densify_grad_threshold": 0.0006
+    "densify_until_iter": 12000,
+    "densify_grad_threshold": 0.0009
   },
 
   "sparse_anchor": {
-    "anchor_stride": 4,
+    "anchor_stride": 8,
     "temporal_window": 2,
-    "knn_k": 48,
+    "knn_k": 32,
     "transport_order": 2,
 
     "consensus_sigma": 1.0,
     "no_fit_confidence": false,
     "wls_eps": 0.01,
 
-    "coarse_levels": 3,
-    "anchor_refine_iters": [5000, 7000, 9000],
+    "coarse_levels": 2,
+    "anchor_refine_iters": [4000, 6000],
 
-    "dyn_select_iter": 9500,
+    "dyn_select_iter": 7000,
     "dyn_w_min": 10.0,
     "ignore_mask": true,
     "motion_dyn_margin": 0.5,
@@ -71,22 +71,16 @@
 
   "train": {
     "test_iterations": [
+      5000,
       10000,
       15000,
-      20000,
-      25000,
-      30000,
-      35000,
-      40000
+      20000
     ],
 
     "save_iterations": [
+      10000,
       15000,
-      20000,
-      25000,
-      30000,
-      35000,
-      40000
+      20000
     ]    
   }
 }
