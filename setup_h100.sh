@@ -126,3 +126,140 @@ PY
         echo "Run: bash $STAG_SCRIPT_PATH" >&2
         exit 1
     fi
+
+    if (( ! STAG_FORCE_INSTALL )) && env_usable; then
+        echo "Environment already OK: $STAG_ENV_PREFIX; nothing to install."
+        exit 0
+    fi
+
+    mkdir -p "$STAG_REPO" "$STAG_REPO/.tmp" "$STAG_REPO/.cache/pip" "$STAG_CONDA_ROOT/pkgs"
+    export TMPDIR="$STAG_REPO/.tmp"
+    export PIP_CACHE_DIR="$STAG_REPO/.cache/pip"
+    export CONDA_PKGS_DIRS="$STAG_CONDA_ROOT/pkgs"
+
+    say '[1/7] Install or repair Miniforge'
+    if (( STAG_REPAIR_CONDA )) || ! conda_usable; then
+        MINIFORGE_SH="$TMPDIR/miniforge.sh"
+        curl -fsSL -o "$MINIFORGE_SH" \
+            https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+        bash "$MINIFORGE_SH" -b -u -p "$STAG_CONDA_ROOT"
+        rm -f "$MINIFORGE_SH"
+    else
+        echo "Miniforge already usable at $STAG_CONDA_ROOT; skipping."
+    fi
+    source "$STAG_CONDA_ROOT/etc/profile.d/conda.sh"
+
+    say '[2/7] Create the stag_h100 Conda environment (python 3.10)'
+    if [[ ! -x "$STAG_ENV_PREFIX/bin/python" ]]; then
+        conda create -y -p "$STAG_ENV_PREFIX" python=3.10
+    else
+        echo "Conda environment already exists at $STAG_ENV_PREFIX; skipping."
+    fi
+    conda activate "$STAG_ENV_PREFIX" || die "Failed to activate $STAG_ENV_PREFIX"
+
+    say '[3/7] Install the CUDA 12.1 toolkit (nvcc) into the environment'
+    if "$STAG_ENV_PREFIX/bin/nvcc" --version 2>/dev/null | grep -q 'release 12\.1'; then
+        echo 'CUDA 12.1 toolkit already installed; skipping.'
+    else
+        conda install -y -c "nvidia/label/cuda-12.1.0" -c nvidia cuda-toolkit=12.1
+    fi
+
+    say '[4/7] Install pinned PyTorch 2.1.2 (cu121) and Python dependencies'
+    python -m pip install --no-cache-dir \
+        torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu121
+    python -m pip install --no-cache-dir \
+        numpy==1.26.4 scipy==1.11.4 opencv-python==4.10.0.84 plyfile==0.8.1 \
+        imageio==2.27.0 imageio-ffmpeg tqdm lpips dearpygui tensorboard
+
+    say '[5/7] Install tmux, zip and unzip into the environment'
+    if [[ -x "$STAG_ENV_PREFIX/bin/tmux" && -x "$STAG_ENV_PREFIX/bin/zip" && -x "$STAG_ENV_PREFIX/bin/unzip" ]]; then
+        echo 'tmux, zip and unzip already present; skipping.'
+    else
+        conda install -y -c conda-forge tmux zip unzip
+    fi
+
+    say '[6/7] Configure a GCC/G++ toolchain compatible with CUDA 12.1'
+    unset CC CXX || true
+    if [[ -x /usr/bin/gcc-12 && -x /usr/bin/g++-12 ]]; then
+        export CC=/usr/bin/gcc-12
+        export CXX=/usr/bin/g++-12
+    elif command -v gcc >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1; then
+        GCC_MAJOR="$(gcc -dumpversion | cut -d. -f1)"
+        if [[ "$GCC_MAJOR" =~ ^[0-9]+$ ]] && (( GCC_MAJOR >= 7 && GCC_MAJOR <= 12 )); then
+            export CC="$(command -v gcc)"
+            export CXX="$(command -v g++)"
+        fi
+    fi
+    if [[ -z "${CC:-}" || -z "${CXX:-}" ]]; then
+        conda install -y -c conda-forge gcc_linux-64=12 gxx_linux-64=12 cmake ninja
+        command -v x86_64-conda-linux-gnu-g++ >/dev/null 2>&1 \
+            || die 'Conda GNU toolchain did not install correctly.'
+        export CC="$(command -v x86_64-conda-linux-gnu-gcc)"
+        export CXX="$(command -v x86_64-conda-linux-gnu-g++)"
+    fi
+    printf 'CC=%s\nCXX=%s\n' "$CC" "$CXX"
+
+    say '[7/7] Build the patched CUDA extensions (simple_knn, diff_gaussian_rasterization)'
+    cd "$STAG_REPO"
+    export TORCH_CUDA_ARCH_LIST='9.0'
+    export MAX_JOBS="${MAX_JOBS:-4}"
+    if (( STAG_REBUILD )) || ! python -c 'import torch; import simple_knn._C' >/dev/null 2>&1; then
+        python -m pip install --no-cache-dir --no-build-isolation --no-deps \
+            --force-reinstall -v "$STAG_REPO/submodules/simple-knn"
+    else
+        echo 'simple_knn already imports correctly; skipping rebuild.'
+    fi
+    if (( STAG_REBUILD )) || ! python - <<'PY' >/dev/null 2>&1
+import torch, inspect
+from diff_gaussian_rasterization import GaussianRasterizer
+assert 'pix_label' in inspect.signature(GaussianRasterizer.forward).parameters
+PY
+    then
+        python -m pip install --no-cache-dir --no-build-isolation --no-deps \
+            --force-reinstall -v "$STAG_REPO/submodules/depth-diff-gaussian-rasterization"
+    else
+        echo 'Gaussian rasterizer already exposes pix_label; skipping rebuild.'
+    fi
+
+    env_usable || die 'Post-install verification failed; see output above.'
+
+    if (( ! STAG_KEEP_CACHE )); then
+        say 'Cleaning Conda and pip caches'
+        conda clean --all -y
+        python -m pip cache purge || true
+    fi
+
+    say 'Installation complete'
+)
+
+_stag_worker
+_stag_rc=$?
+
+if (( _stag_rc != 0 )); then
+    if (( STAG_SOURCED )); then return "$_stag_rc"; else exit "$_stag_rc"; fi
+fi
+
+if (( STAG_CHECK_ONLY )); then
+    if (( STAG_SOURCED )); then return 0; else exit 0; fi
+fi
+
+if (( STAG_SOURCED )); then
+    printf '\n==> %s\n' 'Activating stag_h100 environment in this shell'
+    source "$STAG_CONDA_ROOT/etc/profile.d/conda.sh"
+    conda activate "$STAG_ENV_PREFIX" || return 1
+    export CUDA_HOME="$CONDA_PREFIX"
+    export PATH="$CUDA_HOME/bin:$PATH"
+    export TORCH_CUDA_ARCH_LIST='9.0'
+    export MAX_JOBS="${MAX_JOBS:-4}"
+    STAG_TORCH_LIB="$CONDA_PREFIX/lib/python3.10/site-packages/torch/lib"
+    if [[ -d "$STAG_TORCH_LIB" ]]; then
+        case ":${LD_LIBRARY_PATH:-}:" in
+            *":$STAG_TORCH_LIB:"*) ;;
+            *) export LD_LIBRARY_PATH="$STAG_TORCH_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+        esac
+    fi
+    cd "$STAG_REPO" || return 1
+    printf 'STAG-GS ready | env: %s | repo: %s\n' "$CONDA_PREFIX" "$PWD"
+else
+    echo "Setup complete. To activate in your shell, run: source $STAG_SCRIPT_PATH --activate-only"
+fi
