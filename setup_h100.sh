@@ -223,7 +223,30 @@ PY
         echo 'Gaussian rasterizer already exposes pix_label; skipping rebuild.'
     fi
 
-    env_usable || die 'Post-install verification failed; see output above.'
+    if ! env_usable; then
+        echo 'Post-install verification failed. Re-running the Python import/version checks verbosely:' >&2
+        LD_LIBRARY_PATH="$STAG_ENV_PREFIX/lib/python3.10/site-packages/torch/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            "$STAG_ENV_PREFIX/bin/python" - <<'PY' || true
+import sys, inspect
+print('python:', sys.version_info[:2])
+import torch
+print('torch:', torch.__version__, '| cuda:', torch.version.cuda,
+      '| available:', torch.cuda.is_available(),
+      '| capability:', torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)
+import torchvision
+import numpy, scipy, cv2, plyfile, imageio, imageio_ffmpeg, tqdm, lpips, tensorboard
+print('torchvision:', torchvision.__version__, '| numpy:', numpy.__version__,
+      '| scipy:', scipy.__version__, '| cv2:', cv2.__version__, '| imageio:', imageio.__version__)
+from importlib.metadata import version
+print('plyfile:', version('plyfile'))
+import simple_knn._C
+print('simple_knn._C: OK')
+import diff_gaussian_rasterization
+from diff_gaussian_rasterization import GaussianRasterizer
+print('pix_label present:', 'pix_label' in inspect.signature(GaussianRasterizer.forward).parameters)
+PY
+        die 'Post-install verification failed; see output above.'
+    fi
 
     if (( ! STAG_KEEP_CACHE )); then
         say 'Cleaning Conda and pip caches'
