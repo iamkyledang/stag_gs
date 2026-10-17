@@ -1,3 +1,75 @@
+#!/usr/bin/env bash
+# All-in-one H100 setup for STAG-GS. Safe to re-run; skips steps already completed.
+# Usage: bash setup_h100.sh [--rebuild] [--clean-cache]
+set -euo pipefail
+
+die() { echo "ERROR: $1" >&2; exit 1; }
+say() { printf '\n=== %s ===\n' "$1"; }
+
+REBUILD=0
+CLEAN_CACHE=0
+for arg in "$@"; do
+    case "$arg" in
+        --rebuild) REBUILD=1 ;;
+        --clean-cache) CLEAN_CACHE=1 ;;
+        *) die "Unknown option: $arg" ;;
+    esac
+done
+
+export REPO="${REPO:-/network-volume/stag_gs}"
+mkdir -p "$REPO"
+cd "$REPO" || die "Cannot cd into $REPO"
+
+CONDA_ROOT="$REPO/.conda"
+ENV_PREFIX="$CONDA_ROOT/envs/stag_h100"
+ACTIVATE_FILE="$REPO/.activate_h100_local.sh"
+LOGFILE="$REPO/setup_h100.log"
+exec > >(tee -a "$LOGFILE") 2>&1
+printf '\nSetup run started: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+export TMPDIR="$REPO/.tmp"
+export XDG_CACHE_HOME="$REPO/.cache"
+export PIP_CACHE_DIR="$REPO/.cache/pip"
+export CONDA_PKGS_DIRS="$CONDA_ROOT/pkgs"
+export TORCH_EXTENSIONS_DIR="$REPO/.cache/torch_extensions"
+export HF_HOME="$REPO/.cache/huggingface"
+export TORCH_HOME="$REPO/.cache/torch"
+mkdir -p "$TMPDIR" "$PIP_CACHE_DIR" "$CONDA_PKGS_DIRS" "$TORCH_EXTENSIONS_DIR"
+
+say '[1/8] Install Miniconda into the persistent network volume'
+if [[ ! -f "$CONDA_ROOT/etc/profile.d/conda.sh" ]]; then
+    MINICONDA_SH="$TMPDIR/miniconda.sh"
+    curl -fsSL -o "$MINICONDA_SH" https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+    bash "$MINICONDA_SH" -b -p "$CONDA_ROOT"
+    rm -f "$MINICONDA_SH"
+else
+    echo "Miniconda already installed at $CONDA_ROOT; skipping."
+fi
+source "$CONDA_ROOT/etc/profile.d/conda.sh"
+
+say '[2/8] Create (or reuse) the stag_h100 Conda environment'
+if [[ ! -d "$ENV_PREFIX" ]]; then
+    conda create -y -p "$ENV_PREFIX" python=3.10
+else
+    echo "Conda environment already exists at $ENV_PREFIX; skipping."
+fi
+conda activate "$ENV_PREFIX" || die "Failed to activate $ENV_PREFIX"
+
+say '[3/8] Install PyTorch (CUDA 12.1) and Python dependencies'
+if ! python -c 'import torch' >/dev/null 2>&1; then
+    python -m pip install --no-cache-dir torch torchvision \
+        --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
+else
+    echo 'PyTorch already installed; skipping.'
+fi
+grep -v '^submodules/' requirements.txt > "$TMPDIR/requirements.no_submodules.txt"
+python -m pip install --no-cache-dir -r "$TMPDIR/requirements.no_submodules.txt"
+
+say '[4/8] Verify CUDA is visible and the GPU is an H100 (sm_90)'
+python - <<'PY'
+import torch
+assert torch.cuda.is_available(), 'CUDA is not visible to PyTorch; check GPU drivers/runtime.'
+p = torch.cuda.get_device_properties(0)
 print('GPU:', p.name, '| SM:', (p.major, p.minor), '| VRAM:', round(p.total_memory / 1024**3, 2), 'GiB')
 assert (p.major, p.minor) == (9, 0), 'This script targets NVIDIA H100 sm_90; adapt build flags for other GPUs.'
 PY
