@@ -203,6 +203,8 @@ PY
     cd "$STAG_REPO"
     export TORCH_CUDA_ARCH_LIST='9.0'
     export MAX_JOBS="${MAX_JOBS:-4}"
+    # torch.utils.cpp_extension imports pkg_resources, which setuptools>=81 dropped.
+    python -m pip install --no-cache-dir 'setuptools<81' wheel
     if (( STAG_REBUILD )) || ! python -c 'import torch; import simple_knn._C' >/dev/null 2>&1; then
         python -m pip install --no-cache-dir --no-build-isolation --no-deps \
             --force-reinstall -v "$STAG_REPO/submodules/simple-knn"
