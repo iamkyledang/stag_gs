@@ -167,8 +167,10 @@ PY
     say '[4/7] Install pinned PyTorch 2.1.2 (cu121) and Python dependencies'
     python -m pip install --no-cache-dir \
         torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu121
+    # opencv-python (not -headless) needs libGL.so.1, which headless servers lack.
+    python -m pip uninstall -y opencv-python >/dev/null 2>&1 || true
     python -m pip install --no-cache-dir \
-        numpy==1.26.4 scipy==1.11.4 opencv-python==4.10.0.84 plyfile==0.8.1 \
+        numpy==1.26.4 scipy==1.11.4 opencv-python-headless==4.10.0.84 plyfile==0.8.1 \
         imageio==2.27.0 imageio-ffmpeg tqdm lpips dearpygui tensorboard
 
     say '[5/7] Install tmux, zip and unzip into the environment'
