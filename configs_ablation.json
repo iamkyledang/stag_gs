@@ -1,0 +1,83 @@
+{
+  "_comment": "Ablation config for NeRF-DS (WITH mask, ignore_mask=false), parameter under test = sparse_anchor.anchor_stride (see the 'ablation' section below). Based on configs_nerf_ds_with_mask.json but with a shrunk iteration/densification budget so the full sweep (7 scenes x len(ablation.values) stride settings) fits a 20-24h H100 20GB budget -- see full_ablation.py's docstring for the full time-budget derivation. anchor_stride itself is NOT read from this file's sparse_anchor.anchor_stride at run time: full_ablation.py overrides it per run via train.py's --anchor_stride CLI flag (CLI always wins over configs.json, see arguments/__init__.py's ParamGroup), the value here is only the fallback default if the script is ever invoked oddly. densify_grad_threshold raised and densify_until_iter shortened (vs. the 40000-iter with-mask baseline) specifically to cap peak Gaussian count N, since the smallest ablation stride (most anchors M) is the most memory-hungry case and this config must stay safe across the WHOLE sweep on a 20GB card, not just the default stride.",
+
+  "ablation": {
+    "parameter": "anchor_stride",
+    "values": [4, 8, 16, 32],
+    "_comment": "4 values x 7 nerf_ds scenes = 28 runs. Smaller stride = more anchors = slower/heavier; larger stride = fewer anchors = faster/lighter -- the sweep deliberately spans both sides of the with-mask baseline default (8)."
+  },
+
+  "model": {
+    "sh_degree": 3,
+    "images": "images",
+    "resolution": -1,
+    "white_background": false,
+    "data_device": "cuda",
+    "eval": true,
+    "load2gpu_on_the_fly": false
+  },
+
+  "optimization": {
+    "iterations": 8000,
+    "warm_up": 1500,
+
+    "position_lr_init": 0.00016,
+    "position_lr_final": 0.0000016,
+    "position_lr_delay_mult": 0.01,
+    "position_lr_max_steps": 8000,
+
+    "feature_lr": 0.0025,
+    "opacity_lr": 0.05,
+    "scaling_lr": 0.001,
+    "rotation_lr": 0.001,
+
+    "percent_dense": 0.01,
+    "lambda_dssim": 0.2,
+
+    "densification_interval": 100,
+    "opacity_reset_interval": 3000,
+    "densify_from_iter": 500,
+    "densify_until_iter": 6000,
+    "densify_grad_threshold": 0.001
+  },
+
+  "sparse_anchor": {
+    "anchor_stride": 8,
+    "temporal_window": 2,
+    "knn_k": 32,
+    "transport_order": 2,
+
+    "consensus_sigma": 1.0,
+    "no_fit_confidence": false,
+    "wls_eps": 0.01,
+
+    "coarse_levels": 2,
+    "anchor_refine_iters": [2000, 3000],
+
+    "dyn_select_iter": 2500,
+    "dyn_w_min": 10.0,
+    "ignore_mask": false,
+    "motion_dyn_margin": 0.5,
+    "motion_dyn_floor": 0.01,
+
+    "knn_update_interval": 1000,
+    "mask_vote_decay": 0.999,
+
+    "epsilon": 0.05,
+    "score_kappa_rot": 0.2,
+    "score_kappa_scale": 0.2,
+
+    "lambda_rigid": 0.3,
+    "lambda_temporal": 0.05,
+    "lambda_scale": 0.3,
+
+    "motion_lr_init": 0.0008,
+    "motion_rot_lr": 0.001,
+    "motion_scale_lr": 0.001
+  },
+
+  "train": {
+    "test_iterations": [4000, 8000],
+    "save_iterations": [8000]
+  }
+}
