@@ -15,29 +15,35 @@
 # default (CLI flags override config-file values, see ParamGroup.__init__).
 #
 # ---------------------------------------------------------------------------------------------
-# TIME BUDGET DERIVATION (target: 20-24h total on a single H100, 20GB VRAM) -- see also the repo
-# memory note "configs_nerf_ds_without_mask.json retuned 2026-10-17 after real full_eval.py run"
-# for the empirical numbers this is extrapolated from:
+# TIME BUDGET DERIVATION -- originally targeted 20-24h total on a single H100, 20GB VRAM; the user
+# explicitly chose iterations=20000 (half the 40000-iter with-mask baseline, for closer parity with
+# real training budgets) over shrinking scope, which pushes the realistic total to ~55-60h instead.
+# See also the repo memory note "configs_nerf_ds_without_mask.json retuned 2026-10-17 after real
+# full_eval.py run" for the empirical numbers this is extrapolated from:
 #   - Measured fact: anchor_stride=4, knn_k=48, coarse_levels=3, iterations=40000 took 4h23m for one
 #     nerf_ds scene on this exact 20GB GPU (as_novel_view), and OOM'd on two heavier scenes before
 #     finishing (N grew to 230-290k Gaussians while anchors were still refining towards stride 4).
-#   - configs_ablation.json shrinks the budget heavily versus that measured run: iterations 40000->8000
-#     (5x fewer), densify_until_iter 16000->6000 (so N stops growing much earlier and never reaches the
-#     ranges that OOM'd), densify_grad_threshold 0.0006->0.001 (slower Gaussian growth), knn_k 48->32,
-#     coarse_levels 3->2. This is a deliberately reduced-fidelity proxy budget for comparing the
-#     RELATIVE effect of anchor_stride across scenes, not a publication-quality per-scene result.
+#   - configs_ablation.json shrinks densification/anchor settings versus that measured run:
+#     densify_until_iter 16000->6000 (so N stops growing much earlier and never reaches the ranges
+#     that OOM'd), densify_grad_threshold 0.0006->0.001 (slower Gaussian growth), knn_k 48->32,
+#     coarse_levels 3->2. Peak VRAM is set by max(N)*max(M) reached DURING densification/anchor
+#     refinement, not by how many extra steady-state iterations follow it, so these memory-safety
+#     settings are left UNCHANGED even though iterations increased to 20000 -- the same safety margin
+#     validated for anchor_stride=4 (the heaviest sweep value) still applies, training just spends
+#     longer in the stable post-densification/post-refine phase. iterations itself only scales
+#     wall-clock time, not peak memory.
 #   - Rough per-run cost model (minutes), calibrated off the 4h23m/40000-iter/stride4/knn48 data point
-#     scaled down by iteration count and by anchor density (M ~ 1/anchor_stride, and the dense
-#     per-anchor tensors/fits are the main cost that scales with M on top of a roughly fixed
+#     scaled by iteration count (8000->20000 = 2.5x) and by anchor density (M ~ 1/anchor_stride, and the
+#     dense per-anchor tensors/fits are the main cost that scales with M on top of a roughly fixed
 #     render+backward cost that does not depend on anchor_stride):
-#       stride  4 (most anchors)  ~65 min/scene
-#       stride  8 (baseline)      ~50 min/scene
-#       stride 16                 ~43 min/scene
-#       stride 32 (fewest anchors)~38 min/scene
-#     Average ~49 min/scene-run x 7 nerf_ds scenes x 4 stride values = 28 runs ~ 22.9h total.
-#   - These are ESTIMATES, not a benchmark of this exact reduced config. The script times every run
-#     live and prints a running actual-vs-estimated comparison so you can recalibrate (e.g. lower
-#     --values count, or edit configs_ablation.json's iterations) if real throughput differs.
+#       stride  4 (most anchors)  ~162 min/scene
+#       stride  8 (baseline)      ~125 min/scene
+#       stride 16                 ~108 min/scene
+#       stride 32 (fewest anchors)~95 min/scene
+#     Average ~122 min/scene-run x 7 nerf_ds scenes x 4 stride values = 28 runs ~ 57h total.
+#   - These are ESTIMATES, not a benchmark of this exact config. The script times every run live and
+#     prints a running actual-vs-estimated comparison so you can recalibrate (e.g. lower --values
+#     count, or edit configs_ablation.json's iterations) if real throughput differs.
 #   - Recommended before committing to the full unattended sweep: smoke-test the single
 #     heaviest combination first, e.g.
 #       python full_ablation.py --scenes bell_novel_view --values 4
@@ -68,8 +74,8 @@ CONFIGS_JSON = os.path.join(REPO_ROOT, "configs.json")
 CONFIGS_BACKUP = os.path.join(REPO_ROOT, "configs.json.ablation_backup")
 
 # rough per-scene minute estimates used only for the printed plan/ETA, see the derivation above
-_ESTIMATED_MINUTES = {4: 65, 8: 50, 16: 43, 32: 38}
-_DEFAULT_ESTIMATE_MIN = 50
+_ESTIMATED_MINUTES = {4: 162, 8: 125, 16: 108, 32: 95}
+_DEFAULT_ESTIMATE_MIN = 125
 
 
 def discover_scenes(root):
@@ -220,8 +226,11 @@ def main():
     completed_runs = 0
     total_runs = len(scenes) * len(values)
     try:
-        for value in values:
-            for scene in scenes:
+        # scene outer, stride inner: a scene's whole ablation sweep finishes before moving to the next
+        # scene, so running out of GPU time leaves complete per-scene results instead of one stride
+        # value finished everywhere and the rest of the sweep untouched.
+        for scene in scenes:
+            for value in values:
                 source = os.path.join(NERF_DS_ROOT, scene)
                 model = os.path.join(args.output_path, f"stride_{value}", scene)
                 print(f"\n--- anchor_stride={value}  scene={scene}  ({completed_runs + 1}/{total_runs}) ---")
