@@ -453,10 +453,15 @@ def readNerfiesCameras(path):
         camera['position'] = camera['position'] * coord_scale
         all_cam_params.append(camera)
 
-    # ids (pre-path) are also the mask filenames (flat mask/ folder, not split by rgb resolution)
+    # ids (pre-path) are also the mask filenames. NeRF-DS ships masks split by rgb resolution
+    # (mask/{ratio}x/{id}.png.png, double extension because the id itself already ends in '.png'),
+    # unlike HyperNeRF's flat layout (mask/{id}_mask.png) -- branch on is_nerf_ds so both resolve.
     all_ids = all_img
     all_img = [f'{path}/rgb/{int(1 / ratio)}x/{i}.png' for i in all_ids]
-    mask_dir = f'{path}/mask'
+    if is_nerf_ds:
+        mask_dir = f'{path}/mask/{int(1 / ratio)}x'
+    else:
+        mask_dir = f'{path}/mask'
     has_masks = os.path.isdir(mask_dir)
     if not has_masks:
         print(f"[Mask] no '{mask_dir}' folder found: dynamic/static split will run without mask supervision "
@@ -471,7 +476,7 @@ def readNerfiesCameras(path):
 
         mask = None
         if has_masks:
-            mask_path = f'{mask_dir}/{all_ids[idx]}_mask.png'
+            mask_path = f'{mask_dir}/{all_ids[idx]}.png.png' if is_nerf_ds else f'{mask_dir}/{all_ids[idx]}_mask.png'
             if os.path.exists(mask_path):
                 mask = np.array(Image.open(mask_path).convert('L'))
                 if is_nerf_ds:
