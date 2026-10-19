@@ -1,0 +1,99 @@
+{
+  "_comment": "Ablation config for D-NeRF (no mask; readCamerasFromTransforms never sets a mask for Blender/D-NeRF data, ignore_mask=true kept for explicitness/consistency with configs_dnerf.json, same no-op as there). Parameter under test = sparse_anchor.anchor_stride (see 'ablation' below). Based directly on configs_dnerf.json with iterations LEFT AT 40000 (full baseline, not halved like configs_ablation.json did for nerf_ds) per explicit user request. anchor_stride itself is NOT read from this file at run time: full_ablation_dnerf.py overrides it per run via train.py's --anchor_stride CLI flag (CLI always wins over configs.json, see arguments/__init__.py's ParamGroup) -- the value here is only the fallback default if the script is ever invoked oddly. All other optimization/sparse_anchor settings (densify_until_iter=16000, densify_grad_threshold=0.0006, knn_k=48, coarse_levels=3, anchor_refine_iters, dyn_select_iter=9500) are UNCHANGED from configs_dnerf.json: unlike NeRF-DS, D-NeRF's fixed T=150 training frames keeps the anchor count M tiny (~38 at the heaviest anchor_stride=4, vs NeRF-DS's up to ~213) regardless of stride or freeze timing, so none of the memory-safety retuning that configs_nerf_ds_without_mask.json needed (after a real OOM on this same 20GB GPU) applies here -- see full_ablation_dnerf.py's docstring for the full time-budget derivation and the explicit caveat that this has NOT been benchmarked end-to-end yet.",
+
+  "ablation": {
+    "parameter": "anchor_stride",
+    "values": [4, 8, 16, 32],
+    "_comment": "4 values x 8 dnerf scenes = 32 runs. Smaller stride = more anchors (M) = slower/heavier; larger stride = fewer anchors = faster/lighter. Spans both sides of configs_dnerf.json's baseline default (4, the heaviest here since dnerf has no larger default to contrast against)."
+  },
+
+  "model": {
+    "sh_degree": 3,
+    "images": "images",
+    "resolution": -1,
+    "white_background": false,
+    "data_device": "cuda",
+    "eval": true,
+    "load2gpu_on_the_fly": false
+  },
+
+  "optimization": {
+    "iterations": 40000,
+    "warm_up": 3000,
+
+    "position_lr_init": 0.00016,
+    "position_lr_final": 0.0000016,
+    "position_lr_delay_mult": 0.01,
+    "position_lr_max_steps": 40000,
+
+    "feature_lr": 0.0025,
+    "opacity_lr": 0.05,
+    "scaling_lr": 0.001,
+    "rotation_lr": 0.001,
+
+    "percent_dense": 0.01,
+    "lambda_dssim": 0.2,
+
+    "densification_interval": 100,
+    "opacity_reset_interval": 3000,
+    "densify_from_iter": 500,
+    "densify_until_iter": 16000,
+    "densify_grad_threshold": 0.0006
+  },
+
+  "sparse_anchor": {
+    "anchor_stride": 4,
+    "temporal_window": 2,
+    "knn_k": 48,
+    "transport_order": 2,
+
+    "consensus_sigma": 1.0,
+    "no_fit_confidence": false,
+    "wls_eps": 0.01,
+
+    "coarse_levels": 3,
+    "anchor_refine_iters": [5000, 7000, 9000],
+
+    "dyn_select_iter": 9500,
+    "dyn_w_min": 10.0,
+    "ignore_mask": true,
+    "motion_dyn_margin": 0.5,
+    "motion_dyn_floor": 0.01,
+
+    "knn_update_interval": 1000,
+    "mask_vote_decay": 0.999,
+
+    "epsilon": 0.0,
+    "score_kappa_rot": 0.2,
+    "score_kappa_scale": 0.2,
+
+    "lambda_rigid": 0.3,
+    "lambda_temporal": 0.05,
+    "lambda_scale": 0.3,
+
+    "motion_lr_init": 0.0008,
+    "motion_rot_lr": 0.001,
+    "motion_scale_lr": 0.001
+  },
+
+  "train": {
+    "test_iterations": [
+      10000,
+      15000,
+      20000,
+      25000,
+      30000,
+      35000,
+      40000
+    ],
+
+    "save_iterations": [
+      15000,
+      20000,
+      25000,
+      30000,
+      35000,
+      40000
+    ]
+  }
+}
