@@ -1,6 +1,6 @@
 # STAG-GS
 
-### Remember Less, Render More with Sparse Temporal Motion Records
+### Remember Less, Render More with Sparse Temporal Anchor-Guided Motion Records
 
 Reconstruct dynamic 3D scenes from image sequences and render them at new viewpoints and times.
 STAG-GS learns from all training frames, but stores explicit motion changes only at sparse temporal anchors
