@@ -1,0 +1,1 @@
+Namespace(sh_degree=3, source_path='/network-volume/stag_gs/datasets/dnerf/bouncingballs', model_path='./output/dnerf/bouncingballs', images='images', resolution=-1, white_background=True, data_device='cuda', eval=True, load2gpu_on_the_fly=False)

@@ -1,0 +1,1 @@
+Namespace(sh_degree=3, source_path='/network-volume/stag_gs/datasets/nerf_ds/press_novel_view', model_path='./output/nerf_ds/press_novel_view', images='images', resolution=-1, white_background=False, data_device='cuda', eval=True, load2gpu_on_the_fly=False)

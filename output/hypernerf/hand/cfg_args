@@ -1,0 +1,1 @@
+Namespace(sh_degree=3, source_path='/network-volume/stag_gs/datasets/hypernerf_interp/interp_hand/hand1-dense-v2', model_path='./output/hypernerf/hand', images='images', resolution=-1, white_background=False, data_device='cuda', eval=True, load2gpu_on_the_fly=False)
