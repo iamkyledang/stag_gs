@@ -40,6 +40,8 @@ def motion_deltas(motion, fid, t_noise=0.0):
 
 
 def training(dataset, opt, pipe, sparse_anchor, testing_iterations, saving_iterations, checkpoint_iterations, start_checkpoint):
+    # Track peak PyTorch GPU allocations across setup, training, and validation.
+    torch.cuda.reset_peak_memory_stats()
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
@@ -216,6 +218,9 @@ def training(dataset, opt, pipe, sparse_anchor, testing_iterations, saving_itera
                     motion.optimizer.zero_grad(set_to_none=True)
                     motion.update_learning_rate(iteration)
 
+    torch.cuda.synchronize()
+    peak_gpu_memory_mb = torch.cuda.max_memory_allocated() / 1_000_000
+    print(f"Peak GPU Memory: {peak_gpu_memory_mb:.2f} MB")
     print("Best PSNR = {} in Iteration {}".format(best_psnr, best_iteration))
 
 
